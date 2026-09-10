@@ -1,0 +1,37 @@
+name: TWSE RAW W01 Free
+on:
+  push:
+    branches: [twse-raw-free-20260910]
+    paths:
+      - 'twse_raw_free/**'
+      - '.github/workflows/twse_raw_free.yml'
+permissions:
+  contents: read
+concurrency:
+  group: twse-raw-w01-free
+  cancel-in-progress: false
+
+jobs:
+  bridge:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download and validate bridge RAW
+        run: |
+          python twse_raw_free/collector.py \
+            --work-units twse_raw_free/work_units.csv \
+            --output-root out_bridge \
+            --phase BRIDGE --package \
+            --attempts 5 --retry-wait 8 --min-delay 0.8 --max-delay 1.4
+      - name: Upload bridge package
+        uses: actions/upload-artifact@v4
+        with:
+          name: TWSE_DAILY_K_BRIDGE_20260810_20260813_OFFICIAL_RAW
+          path: |
+            out_bridge/packages/*.zip
+            out_bridge/manifest/*.json
+            out_bridge/manifest/*.jsonl
+          compression-level: 9
+          retention-days: 1
+          if-no-files-found: error
