@@ -1,0 +1,33 @@
+name: TWSE RAW W01 V4 2004
+on:
+  push:
+    branches: [twse-raw-free-v4-20260910]
+    paths:
+      - 'twse_raw_v4/**'
+      - '.github/workflows/twse_raw_v4_2004.yml'
+permissions:
+  contents: read
+jobs:
+  scan2004:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install requests
+        run: python -m pip install --disable-pip-version-check --quiet requests
+      - name: Source-driven scan 2004
+        id: scan
+        continue-on-error: true
+        run: python twse_raw_v4/collector_v4.py --year 2004 --out out_2004
+      - name: Upload 2004 RAW or partial checkpoint
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: TWSE_DAILY_K_2004_V4_SOURCE_SCAN
+          path: out_2004/
+          retention-days: 1
+          compression-level: 0
+          if-no-files-found: error
+      - name: Propagate scan result
+        if: steps.scan.outcome != 'success'
+        run: exit 1
