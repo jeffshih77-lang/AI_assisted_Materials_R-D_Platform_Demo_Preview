@@ -1,4 +1,4 @@
-name: W06 TAIEX byte transport qualification
+name: W06 TAIEX full fidelity capture
 
 on:
   push:
@@ -11,43 +11,115 @@ permissions:
   contents: read
 
 jobs:
-  qualify:
+  capture:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
-      - name: Fetch exact TWSE response twice and verify byte identity
+      - name: Capture exact TWSE monthly CSV response bytes
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p out
+          mkdir -p out/raw out/meta
           python3 - <<'PY'
-          import datetime as dt, hashlib, json, pathlib, urllib.request
-          url='https://www.twse.com.tw/indicesReport/MI_5MINS_HIST?date=20260701&response=csv'
-          ua='Mozilla/5.0 (compatible; W06TAIEXFidelityRepair/1.0)'
-          root=pathlib.Path('out')
-          rows=[]
-          bodies=[]
-          for i in (1,2):
-              req=urllib.request.Request(url,method='GET',headers={'User-Agent':ua,'Accept':'text/csv,*/*'})
-              retrieved=dt.datetime.now(dt.timezone.utc).isoformat().replace('+00:00','Z')
-              with urllib.request.urlopen(req,timeout=120) as resp:
-                  body=resp.read(); status=getattr(resp,'status',None); final=resp.geturl(); headers=dict(resp.headers.items())
-              if status != 200 or not body:
-                  raise SystemExit(f'bad response {i}: status={status} bytes={len(body)}')
-              sha=hashlib.sha256(body).hexdigest()
-              (root/f'probe_{i}.response.bin').write_bytes(body)
-              rows.append({'attempt':i,'retrieved_at':retrieved,'status':status,'final_url':final,'headers':headers,'bytes':len(body),'sha256':sha})
-              bodies.append(body)
-          identical=bodies[0] == bodies[1]
-          manifest={'schema':'w06_taiex_transport_qualification_v1','source_family':'TWSE_INDICES_REPORT_MI_5MINS_HIST','request_url':url,'request_headers':{'User-Agent':ua,'Accept':'text/csv,*/*'},'attempts':rows,'repeat_request_byte_identical':identical,'classification':'SOURCE_BYTE_CAPTURE_QUALIFICATION'}
-          (root/'MANIFEST.json').write_text(json.dumps(manifest,ensure_ascii=False,indent=2,sort_keys=True)+'\n',encoding='utf-8')
-          print(json.dumps(manifest,ensure_ascii=False))
-          if not identical:
-              raise SystemExit('repeat request bytes differ; qualification fail-closed')
+          import datetime as dt, hashlib, json, pathlib, time, urllib.request
+
+          ROOT=pathlib.Path('out')
+          RAW=ROOT/'raw'; META=ROOT/'meta'
+          UA='Mozilla/5.0 (compatible; W06TAIEXFidelityRepair/1.0)'
+          BASE='https://www.twse.com.tw/indicesReport/MI_5MINS_HIST'
+          TARGET_END='2026-09-09'
+
+          months=[]
+          y,m=1999,1
+          while (y,m) <= (2026,9):
+              months.append(f'{y:04d}-{m:02d}')
+              m += 1
+              if m == 13:
+                  y += 1; m = 1
+
+          def fetch(url):
+              last=None
+              for attempt in range(1,4):
+                  try:
+                      req=urllib.request.Request(url,method='GET',headers={'User-Agent':UA,'Accept':'text/csv,*/*'})
+                      retrieved=dt.datetime.now(dt.timezone.utc).isoformat().replace('+00:00','Z')
+                      with urllib.request.urlopen(req,timeout=120) as resp:
+                          body=resp.read(); status=getattr(resp,'status',None); final=resp.geturl(); headers=dict(resp.headers.items())
+                      if status != 200 or not body:
+                          raise RuntimeError(f'status={status} bytes={len(body)}')
+                      return body, status, final, headers, retrieved, attempt
+                  except Exception as e:
+                      last=repr(e)
+                      if attempt < 3: time.sleep(attempt)
+              raise RuntimeError(last)
+
+          manifest={
+              'schema':'w06_taiex_full_source_byte_capture_v1',
+              'work_id':'FIDELITY-W06',
+              'dataset_id':'TAIEX_DAILY',
+              'source_family':'TWSE_INDICES_REPORT_MI_5MINS_HIST',
+              'request_contract':{'method':'GET','base_url':BASE,'params':'date=YYYYMM01&response=csv','headers':{'User-Agent':UA,'Accept':'text/csv,*/*'}},
+              'historical_baseline_end':TARGET_END,
+              'requested_months':len(months),
+              'captures':[],
+              'failures':[]
+          }
+
+          for idx,month in enumerate(months,1):
+              y,mo=map(int,month.split('-'))
+              date=f'{y:04d}{mo:02d}01'
+              url=f'{BASE}?date={date}&response=csv'
+              try:
+                  body,status,final,headers,retrieved,attempt=fetch(url)
+                  sha=hashlib.sha256(body).hexdigest()
+                  name=f'TAIEX_{y:04d}{mo:02d}_TWSE_MI_5MINS_HIST.response.csv'
+                  (RAW/name).write_bytes(body)
+                  text=body.decode('cp950',errors='replace')
+                  lines=[ln for ln in text.replace('\r\n','\n').replace('\r','\n').split('\n') if ln.strip()]
+                  content_disposition=headers.get('Content-Disposition') or headers.get('content-disposition')
+                  content_type=headers.get('Content-Type') or headers.get('content-type')
+                  max_date=None
+                  min_date=None
+                  dates=[]
+                  import re
+                  for ln in lines:
+                      m1=re.match(r'^["\ufeff]?([0-9]{3})/([0-9]{2})/([0-9]{2})',ln)
+                      if m1:
+                          roc,mm,dd=map(int,m1.groups()); dates.append(f'{roc+1911:04d}-{mm:02d}-{dd:02d}')
+                  if dates:
+                      min_date=min(dates); max_date=max(dates)
+                  promote = not (month == '2026-09' and max_date and max_date > TARGET_END)
+                  classification='SOURCE_BYTE_RAW_CANDIDATE' if promote else 'SOURCE_BYTE_EVIDENCE_NOT_PROMOTED_POST_BASELINE_ROWS'
+                  meta={
+                      'schema':'w06_exact_http_capture_v1','work_id':'FIDELITY-W06','dataset_id':'TAIEX_DAILY','month':month,
+                      'source_family':'TWSE_INDICES_REPORT_MI_5MINS_HIST','method':'GET','request_url':url,
+                      'request_headers':{'User-Agent':UA,'Accept':'text/csv,*/*'},'retrieved_at':retrieved,'http_status':status,
+                      'final_url':final,'response_headers':headers,'payload_bytes':len(body),'payload_sha256':sha,
+                      'content_type':content_type,'content_disposition':content_disposition,'raw_member':f'raw/{name}',
+                      'decoded_line_count':len(lines),'observed_coverage_start':min_date,'observed_coverage_end':max_date,
+                      'historical_baseline_end':TARGET_END,'promotion_eligible':promote,'classification':classification,
+                      'fetch_attempt':attempt,'raw_semantics':'exact HTTP response body bytes'
+                  }
+                  (META/f'{y:04d}{mo:02d}.json').write_text(json.dumps(meta,ensure_ascii=False,indent=2,sort_keys=True)+'\n',encoding='utf-8')
+                  manifest['captures'].append(meta)
+                  print(json.dumps({'i':idx,'month':month,'bytes':len(body),'sha256':sha,'coverage_end':max_date,'promotion_eligible':promote},ensure_ascii=False))
+              except Exception as e:
+                  rec={'month':month,'request_url':url,'error':repr(e)}
+                  manifest['failures'].append(rec)
+                  print(json.dumps({'i':idx,'month':month,'failure':repr(e)},ensure_ascii=False))
+              time.sleep(0.12)
+
+          manifest['captured_months']=len(manifest['captures'])
+          manifest['failure_months']=len(manifest['failures'])
+          manifest['promotion_eligible_months']=sum(1 for x in manifest['captures'] if x['promotion_eligible'])
+          manifest['not_promoted_months']=[x['month'] for x in manifest['captures'] if not x['promotion_eligible']]
+          (ROOT/'MANIFEST.json').write_text(json.dumps(manifest,ensure_ascii=False,indent=2,sort_keys=True)+'\n',encoding='utf-8')
+          print(json.dumps({'summary':{'requested':len(months),'captured':manifest['captured_months'],'failed':manifest['failure_months'],'promotion_eligible':manifest['promotion_eligible_months'],'not_promoted':manifest['not_promoted_months']}},ensure_ascii=False))
           PY
-      - name: Upload qualification artifact
+      - name: Upload full fidelity capture artifact
         uses: actions/upload-artifact@v4
         with:
-          name: w06-taiex-byte-transport-qualification
+          name: w06-taiex-full-source-byte-capture
           path: out/
           if-no-files-found: error
           retention-days: 7
