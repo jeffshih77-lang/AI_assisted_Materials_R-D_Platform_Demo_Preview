@@ -1,0 +1,62 @@
+name: W08 temp public runner failed segments
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/w08_temp_public_runner_failed_segments.yml
+
+permissions:
+  contents: read
+
+jobs:
+  recovery_capture:
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        segment:
+          - { start: 106, end: 108 }
+          - { start: 115, end: 115 }
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    env:
+      START_ROC: ${{ matrix.segment.start }}
+      END_ROC: ${{ matrix.segment.end }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Guard W08 recovery scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "${START_ROC}-${END_ROC}" in
+            106-108|115-115) ;;
+            *) echo "Refusing out-of-scope W08 segment: ${START_ROC}-${END_ROC}" >&2; exit 2 ;;
+          esac
+          sha256sum w08_public_runner/w08_mops_t51_segment_v5.py
+          echo "W08 isolated recovery; no project secrets; only failed/cancelled segments."
+
+      - name: Capture exact-byte W08 recovery segment
+        run: python3 w08_public_runner/w08_mops_t51_segment_v5.py
+
+      - name: Summarize W08 recovery segment
+        if: always()
+        shell: bash
+        run: |
+          dir="out_roc${START_ROC}_${END_ROC}"
+          if [ -d "$dir" ]; then
+            du -sh "$dir" || true
+            find "$dir" -type f | wc -l || true
+            [ -f "$dir/MANIFEST.json" ] && sha256sum "$dir/MANIFEST.json" || true
+            [ -f "$dir/RUN_STATE.json" ] && cat "$dir/RUN_STATE.json" || true
+          fi
+
+      - name: Upload W08 recovery exact bytes
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: w08-mops-t51-t05-formal-raw-roc${{ matrix.segment.start }}-${{ matrix.segment.end }}-public-recovery-v8
+          path: out_roc${{ matrix.segment.start }}_${{ matrix.segment.end }}/
+          if-no-files-found: error
+          retention-days: 7
