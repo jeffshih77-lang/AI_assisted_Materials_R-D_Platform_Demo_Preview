@@ -1,0 +1,23 @@
+name: W08 MOPS capability probe v3
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/w08_mops_capability_probe_v3.yml]
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 w08_public_runner/w08_mops_capability_probe_v3.py
+      - if: always()
+        run: ls -lh w08_capability_probe_v3_out && sha256sum w08_capability_probe_v3_out/CAPABILITY.json || true
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: w08-mops-capability-probe-v3
+          path: w08_capability_probe_v3_out/
+          if-no-files-found: error
+          retention-days: 7
