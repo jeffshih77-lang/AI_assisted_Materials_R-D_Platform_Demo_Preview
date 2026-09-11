@@ -1,0 +1,41 @@
+name: TEMP P4-A public runner ROC115 L p14-15
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/p4a_temp_public_runner_115L_p14_15.yml'
+      - 'p4a_runner/p4a_material_info_page_chunk_v4.py'
+jobs:
+  capture:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      ROC_YEAR: '115'
+      KIND: 'L'
+      START_PAGE: '14'
+      END_PAGE: '15'
+      DETAIL_WORKERS: '12'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Capture formal RAW
+        run: python p4a_runner/p4a_material_info_page_chunk_v4.py
+      - name: Package artifact
+        run: |
+          python - <<'PY'
+          import pathlib, zipfile
+          root=next(pathlib.Path('out_p4a_chunk').iterdir())
+          out=pathlib.Path(root.name+'.zip')
+          with zipfile.ZipFile(out,'w',zipfile.ZIP_DEFLATED) as z:
+              for p in sorted(root.rglob('*')):
+                  if p.is_file(): z.write(p,p.relative_to(root.parent))
+          print(out)
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: p4a-material-info-ROC115-L-p0014-p0015-public-runner-v4
+          path: P4A-MATERIAL-ROC115-L-P0014-0015.zip
+          if-no-files-found: error
+          retention-days: 1
