@@ -1,0 +1,54 @@
+name: W08 T05ST09 formal RAW v1
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/w08_t05st09_formal_raw_v1.yml
+
+permissions:
+  contents: read
+
+jobs:
+  capture:
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        chunk: [0,1,2,3,4,5,6,7]
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    env:
+      CHUNK_INDEX: ${{ matrix.chunk }}
+      CHUNK_COUNT: 8
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify frozen universe
+        run: |
+          python3 - <<'PY'
+          import json
+          p='w08_public_runner/w08_company_code_universe_v1.json'
+          d=json.load(open(p))
+          assert d['counts']=={'all':2436,'pre':1281}
+          assert len(d['all_numeric_4digit_codes'])==2436
+          assert len(d['pre_20050505_codes'])==1281
+          assert len(set(d['all_numeric_4digit_codes']))==2436
+          print('universe gate PASS')
+          PY
+      - name: Capture exact-byte T05ST09 chunk
+        run: python3 w08_public_runner/w08_t05st09_formal_raw_chunk_v1.py
+      - name: Summarize
+        if: always()
+        run: |
+          d=$(printf 'out_t05st09_chunk_%02d_of_08' "$CHUNK_INDEX")
+          [ -d "$d" ] && du -sh "$d" || true
+          [ -f "$d/RUN_STATE.json" ] && cat "$d/RUN_STATE.json" || true
+          [ -f "$d/MANIFEST.json" ] && sha256sum "$d/MANIFEST.json" || true
+      - name: Upload exact-byte chunk
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: w08-t05st09-formal-raw-chunk-${{ matrix.chunk }}-of-8-v1
+          path: out_t05st09_chunk_*/
+          if-no-files-found: error
+          retention-days: 7
