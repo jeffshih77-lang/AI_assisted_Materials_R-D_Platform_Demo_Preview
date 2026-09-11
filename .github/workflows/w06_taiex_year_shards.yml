@@ -1,0 +1,69 @@
+name: W06 TAIEX yearly source-byte capture
+
+on:
+  push:
+    branches:
+      - w06-taiex-byte-transport-20260911
+    paths:
+      - .github/workflows/w06_taiex_year_shards.yml
+
+permissions:
+  contents: read
+
+jobs:
+  capture_year:
+    strategy:
+      fail-fast: false
+      matrix:
+        year: [1999,2000,2001,2002,2003,2004,2005,2006,2007,2008,2009,2010,2011,2012,2013,2014,2015,2016,2017,2018,2019,2020,2021,2022,2023,2024,2025,2026]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Capture exact TWSE monthly CSV bytes for year
+        shell: bash
+        env:
+          YEAR: ${{ matrix.year }}
+        run: |
+          set -euo pipefail
+          mkdir -p out/raw out/meta
+          python3 - <<'PY'
+          import datetime as dt, hashlib, json, os, pathlib, re, time, urllib.request
+          y=int(os.environ['YEAR']); root=pathlib.Path('out'); raw=root/'raw'; meta=root/'meta'
+          ua='Mozilla/5.0 (compatible; W06TAIEXFidelityRepair/1.0)'
+          base='https://www.twse.com.tw/indicesReport/MI_5MINS_HIST'; target_end='2026-09-09'
+          last_month=9 if y==2026 else 12
+          captures=[]; failures=[]
+          for mo in range(1,last_month+1):
+              month=f'{y:04d}-{mo:02d}'; date=f'{y:04d}{mo:02d}01'; url=f'{base}?date={date}&response=csv'
+              err=None
+              for attempt in range(1,4):
+                  try:
+                      req=urllib.request.Request(url,headers={'User-Agent':ua,'Accept':'text/csv,*/*'})
+                      retrieved=dt.datetime.now(dt.timezone.utc).isoformat().replace('+00:00','Z')
+                      with urllib.request.urlopen(req,timeout=45) as resp:
+                          body=resp.read(); status=getattr(resp,'status',None); final=resp.geturl(); headers=dict(resp.headers.items())
+                      if status != 200 or not body: raise RuntimeError(f'status={status} bytes={len(body)}')
+                      sha=hashlib.sha256(body).hexdigest(); name=f'TAIEX_{y:04d}{mo:02d}_TWSE_MI_5MINS_HIST.response.csv'; (raw/name).write_bytes(body)
+                      text=body.decode('cp950',errors='replace'); dates=[]
+                      for ln in text.replace('\r\n','\n').replace('\r','\n').split('\n'):
+                          m=re.match(r'^["\ufeff]?([0-9]{3})/([0-9]{2})/([0-9]{2})',ln)
+                          if m:
+                              roc,mm,dd=map(int,m.groups()); dates.append(f'{roc+1911:04d}-{mm:02d}-{dd:02d}')
+                      mn=min(dates) if dates else None; mx=max(dates) if dates else None
+                      promote=not (month=='2026-09' and mx and mx>target_end)
+                      rec={'schema':'w06_exact_http_capture_v1','work_id':'FIDELITY-W06','dataset_id':'TAIEX_DAILY','month':month,'source_family':'TWSE_INDICES_REPORT_MI_5MINS_HIST','method':'GET','request_url':url,'request_headers':{'User-Agent':ua,'Accept':'text/csv,*/*'},'retrieved_at':retrieved,'http_status':status,'final_url':final,'response_headers':headers,'payload_bytes':len(body),'payload_sha256':sha,'raw_member':f'raw/{name}','observed_coverage_start':mn,'observed_coverage_end':mx,'historical_baseline_end':target_end,'promotion_eligible':promote,'classification':'SOURCE_BYTE_RAW_CANDIDATE' if promote else 'SOURCE_BYTE_EVIDENCE_NOT_PROMOTED_POST_BASELINE_ROWS','fetch_attempt':attempt,'raw_semantics':'exact HTTP response body bytes'}
+                      (meta/f'{y:04d}{mo:02d}.json').write_text(json.dumps(rec,ensure_ascii=False,indent=2,sort_keys=True)+'\n',encoding='utf-8'); captures.append(rec); err=None; break
+                  except Exception as e:
+                      err=repr(e); time.sleep(attempt)
+              if err: failures.append({'month':month,'request_url':url,'error':err})
+          manifest={'schema':'w06_taiex_year_source_byte_capture_v1','year':y,'requested_months':last_month,'captured_months':len(captures),'failure_months':len(failures),'captures':captures,'failures':failures}
+          (root/'MANIFEST_YEAR.json').write_text(json.dumps(manifest,ensure_ascii=False,indent=2,sort_keys=True)+'\n',encoding='utf-8')
+          print(json.dumps({'year':y,'requested':last_month,'captured':len(captures),'failed':len(failures)},ensure_ascii=False))
+          PY
+      - name: Upload yearly capture artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: w06-taiex-${{ matrix.year }}-source-byte
+          path: out/
+          if-no-files-found: error
+          retention-days: 7
