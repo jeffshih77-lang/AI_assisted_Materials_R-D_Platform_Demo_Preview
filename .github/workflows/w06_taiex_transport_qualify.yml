@@ -1,0 +1,53 @@
+name: W06 TAIEX byte transport qualification
+
+on:
+  push:
+    branches:
+      - w06-taiex-byte-transport-20260911
+    paths:
+      - .github/workflows/w06_taiex_transport_qualify.yml
+
+permissions:
+  contents: read
+
+jobs:
+  qualify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch exact TWSE response twice and verify byte identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          python3 - <<'PY'
+          import datetime as dt, hashlib, json, pathlib, urllib.request
+          url='https://www.twse.com.tw/indicesReport/MI_5MINS_HIST?date=20260701&response=csv'
+          ua='Mozilla/5.0 (compatible; W06TAIEXFidelityRepair/1.0)'
+          root=pathlib.Path('out')
+          rows=[]
+          bodies=[]
+          for i in (1,2):
+              req=urllib.request.Request(url,method='GET',headers={'User-Agent':ua,'Accept':'text/csv,*/*'})
+              retrieved=dt.datetime.now(dt.timezone.utc).isoformat().replace('+00:00','Z')
+              with urllib.request.urlopen(req,timeout=120) as resp:
+                  body=resp.read(); status=getattr(resp,'status',None); final=resp.geturl(); headers=dict(resp.headers.items())
+              if status != 200 or not body:
+                  raise SystemExit(f'bad response {i}: status={status} bytes={len(body)}')
+              sha=hashlib.sha256(body).hexdigest()
+              (root/f'probe_{i}.response.bin').write_bytes(body)
+              rows.append({'attempt':i,'retrieved_at':retrieved,'status':status,'final_url':final,'headers':headers,'bytes':len(body),'sha256':sha})
+              bodies.append(body)
+          identical=bodies[0] == bodies[1]
+          manifest={'schema':'w06_taiex_transport_qualification_v1','source_family':'TWSE_INDICES_REPORT_MI_5MINS_HIST','request_url':url,'request_headers':{'User-Agent':ua,'Accept':'text/csv,*/*'},'attempts':rows,'repeat_request_byte_identical':identical,'classification':'SOURCE_BYTE_CAPTURE_QUALIFICATION'}
+          (root/'MANIFEST.json').write_text(json.dumps(manifest,ensure_ascii=False,indent=2,sort_keys=True)+'\n',encoding='utf-8')
+          print(json.dumps(manifest,ensure_ascii=False))
+          if not identical:
+              raise SystemExit('repeat request bytes differ; qualification fail-closed')
+          PY
+      - name: Upload qualification artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: w06-taiex-byte-transport-qualification
+          path: out/
+          if-no-files-found: error
+          retention-days: 7
