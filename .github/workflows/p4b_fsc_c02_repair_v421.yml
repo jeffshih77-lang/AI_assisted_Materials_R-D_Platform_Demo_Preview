@@ -1,0 +1,31 @@
+name: P4-B FSC C02 qualified archival repair v4.2.1
+
+on:
+  push:
+    branches: [p4b-runner-probe-20260912]
+    paths: [.github/workflows/p4b_fsc_c02_repair_v421.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+      - name: Syntax gate
+        run: python3 -m py_compile tools/p4b_chunk_capture_v42.py
+      - name: Capture C02 with qualified record 13657 archival replay
+        run: python3 tools/p4b_chunk_capture_v42.py C02
+      - name: Upload package
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: p4b-fsc-recovery-C02-v421
+          path: |
+            out/P4B_FSC_RECOVERY_C02_V42.zip
+            out/P4B_FSC_RECOVERY_C02_V42_RECEIPT.json
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
