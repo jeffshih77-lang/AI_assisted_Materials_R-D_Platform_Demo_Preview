@@ -1,0 +1,21 @@
+name: P4-B FSC frozen identity hash gate
+
+on:
+  push:
+    branches:
+      - p4b-runner-probe-20260912
+    paths:
+      - .github/workflows/p4b_fsc_hash_gate.yml
+      - tools/p4b_fsc_hash_gate.py
+
+permissions:
+  contents: read
+
+jobs:
+  hash-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rebuild current FSC identity view and compare to frozen snapshot hashes
+        run: python3 tools/p4b_fsc_hash_gate.py
