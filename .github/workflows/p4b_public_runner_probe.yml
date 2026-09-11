@@ -1,0 +1,35 @@
+name: P4-B isolated public runner transport probe
+
+on:
+  push:
+    branches:
+      - p4b-runner-probe-20260912
+    paths:
+      - .github/workflows/p4b_public_runner_probe.yml
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Runner alive
+        run: |
+          set -euo pipefail
+          echo P4B_PUBLIC_RUNNER_OK
+          python3 --version
+      - name: FSC DNS and HTTPS probe
+        run: |
+          set -euo pipefail
+          getent ahosts www.fsc.gov.tw | head
+          python3 - <<'PY'
+          import urllib.request
+          u='https://www.fsc.gov.tw/ch/home.jsp?id=96&parentpath=0,2&mcustomize=news_view.jsp&dataserno=1553&dtable=News'
+          req=urllib.request.Request(u, headers={'User-Agent':'Mozilla/5.0 (P4B transport probe)'})
+          with urllib.request.urlopen(req, timeout=30) as r:
+              b=r.read()
+              print('status', getattr(r,'status',None), 'bytes', len(b), 'content_type', r.headers.get('Content-Type'))
+              print('prefix', b[:16].hex())
+          PY
