@@ -1,0 +1,77 @@
+name: P3D CBC TWD Patch
+
+on:
+  push:
+    branches: [p3d-raw-20260911]
+    paths: ['.github/workflows/p3d_cbc_twd_patch.yml']
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Collect CBC official NTD USD pages
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p cbc/raw cbc/headers cbc/meta
+          seq 1 90 > cbc/meta/pages.txt
+          fetch_page() {
+            p="$1"; url="https://www.cbc.gov.tw/en/lp-700-2-${p}-20.html"
+            code=$(curl --http1.1 --compressed -L --fail --retry 2 --retry-all-errors --retry-delay 1 --connect-timeout 10 --max-time 30 -A 'Mozilla/5.0 P3D-RAW-Collector/2.1' -D "cbc/headers/page_${p}.headers.txt" -o "cbc/raw/page_${p}.html" -w '%{http_code}' "$url")
+            test "$code" = 200; test -s "cbc/raw/page_${p}.html"
+            sha=$(sha256sum "cbc/raw/page_${p}.html"|awk '{print $1}'); bytes=$(wc -c < "cbc/raw/page_${p}.html"|tr -d ' ')
+            printf '%s\t%s\t%s\t%s\t%s\n' "$p" "$url" "$code" "$bytes" "$sha" > "cbc/meta/page_${p}.row"
+          }
+          export -f fetch_page
+          cat cbc/meta/pages.txt | xargs -n1 -P8 -I{} bash -c 'fetch_page "$@"' _ {}
+          printf 'page\turl\thttp\tbytes\tsha256\n' > cbc/meta/download_log.tsv
+          cat cbc/meta/page_*.row | sort -n -k1,1 >> cbc/meta/download_log.tsv
+      - name: Parse and validate patch coverage
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip -q install beautifulsoup4
+          python <<'PY'
+          import pathlib,re,datetime,json,hashlib
+          from bs4 import BeautifulSoup
+          root=pathlib.Path('cbc'); obs={}; manifest=[]
+          for p in sorted((root/'raw').glob('page_*.html'), key=lambda x:int(re.search(r'(\d+)',x.stem).group(1))):
+              b=p.read_bytes(); page=int(re.search(r'(\d+)',p.stem).group(1)); url=f'https://www.cbc.gov.tw/en/lp-700-2-{page}-20.html'
+              manifest.append({'page':page,'url':url,'file':str(p),'bytes':len(b),'sha256':hashlib.sha256(b).hexdigest()})
+              soup=BeautifulSoup(b,'html.parser')
+              for tr in soup.find_all('tr'):
+                  cells=[' '.join(x.get_text(' ',strip=True).split()) for x in tr.find_all(['td','th'])]
+                  if len(cells)<2: continue
+                  d=cells[0].strip(); v=cells[1].replace(',','').strip()
+                  if re.fullmatch(r'\d{4}/\d{2}/\d{2}',d) and re.fullmatch(r'\d+(?:\.\d+)?',v):
+                      obs[datetime.datetime.strptime(d,'%Y/%m/%d').date()]=v
+          assert obs, 'no observations parsed'
+          start=datetime.date(2020,10,31); patch={d:v for d,v in obs.items() if d>=start}
+          assert patch, 'no patch observations'
+          assert max(patch)>=datetime.date(2026,9,9), max(patch)
+          assert min(patch)<=datetime.date(2020,11,2), min(patch)
+          rows=[{'date':d.isoformat(),'ntd_per_usd':patch[d]} for d in sorted(patch)]
+          (root/'meta'/'parsed_patch.json').write_text(json.dumps(rows,indent=2),encoding='utf-8')
+          (root/'meta'/'manifest.json').write_text(json.dumps(manifest,indent=2),encoding='utf-8')
+          cov={'instrument':'CBC_NTD_USD','start':min(patch).isoformat(),'end':max(patch).isoformat(),'rows':len(patch),'source':'Central Bank of the Republic of China (Taiwan)','raw_pages':len(manifest),'status':'PASS'}
+          (root/'meta'/'coverage.json').write_text(json.dumps(cov,indent=2),encoding='utf-8')
+          work=[{'instrument':'NTD_USD','year':y,'status':'COVERED_BY_CBC_IMMUTABLE_HTML_RAW'} for y in range(min(patch).year,max(patch).year+1)]
+          (root/'meta'/'work_units.json').write_text(json.dumps(work,indent=2),encoding='utf-8')
+          print(json.dumps(cov,indent=2))
+          PY
+      - name: Package deterministic patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          tar --sort=name --mtime='UTC 2026-09-11' --owner=0 --group=0 --numeric-owner -czf P3D_CBC_NTDUSD_PATCH_20260911.tar.gz cbc
+          sha256sum P3D_CBC_NTDUSD_PATCH_20260911.tar.gz > P3D_CBC_NTDUSD_PATCH_20260911.tar.gz.sha256
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: P3D_CBC_NTDUSD_PATCH_20260911
+          path: |
+            P3D_CBC_NTDUSD_PATCH_20260911.tar.gz
+            P3D_CBC_NTDUSD_PATCH_20260911.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 30
