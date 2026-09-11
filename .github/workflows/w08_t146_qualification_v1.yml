@@ -1,0 +1,39 @@
+name: W08 T146 qualification v1
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/w08_t146_qualification_v1.yml
+
+permissions:
+  contents: read
+
+jobs:
+  qualify_t146_form:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Qualification-only official form inventory
+        run: python3 w08_public_runner/w08_t146_form_qualification_v1.py
+      - name: Summarize qualification
+        if: always()
+        shell: bash
+        run: |
+          ls -lh w08_t146_qualification_v1 || true
+          [ -f w08_t146_qualification_v1/QUALIFICATION.json ] && python3 - <<'PY'
+          import json
+          p='w08_t146_qualification_v1/QUALIFICATION.json'
+          d=json.load(open(p))
+          print(json.dumps({k:d[k] for k in ('payload_bytes','payload_sha256','assertions')},indent=2,ensure_ascii=False))
+          print('forms', len(d.get('forms_parsed',[])), 'controls',len(d.get('global_controls',[])))
+          PY
+      - name: Upload qualification evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: w08-t146-qualification-v1
+          path: w08_t146_qualification_v1/
+          if-no-files-found: error
+          retention-days: 7
