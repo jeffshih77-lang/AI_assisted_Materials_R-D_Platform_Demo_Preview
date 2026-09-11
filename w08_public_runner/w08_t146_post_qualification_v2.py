@@ -40,7 +40,7 @@ meta={
  },
  'qualification_basis':{
    'official_form':'form1 action=/mops/web/ajax_t146sb10 method=post',
-   'official_pre_submit_js':'doAction() sets step=1 when nonzero and firstin=1, then action=/mops/web/ajax_'+document.fh.funcName.value',
+   'official_pre_submit_js':"doAction() sets step=1 when nonzero and firstin=1, then action=/mops/web/ajax_ + document.fh.funcName.value",
    'serialization':'ordered successful named controls in official form DOM; unchecked radios and unnamed controls excluded; query choices explicitly set to scope=2/typek=sii/custom-date/noticeKind=30/sort=1'
  }
 }
