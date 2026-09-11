@@ -1,0 +1,23 @@
+{
+  "C01": {"fullrow_sha256":"ec010634e86d52ff2c2e5b249b1ab4380c353512980487c613f1b6d68d23eaa3","identity_sha256":"b25fa4c78f6baed561fd220c687473a41d88a872f5f757feb99f46acfa1cae05","record_no_max":14625,"record_no_min":14026},
+  "C02": {"fullrow_sha256":"4d8609fc521e74e6c71a0a0a0e4e0529ce7ccf1564226c63489020c2d8805ebc","identity_sha256":"218a6a0aa9793cddf745af0db81b6952268d97570ce8c80bbb139751e5f30acd","record_no_max":14025,"record_no_min":13426},
+  "C06": {"fullrow_sha256":"3e7cd02ce491dbad4e83f0670ed4f82ff8e04f6037df7e27f8689c690aec530e","identity_sha256":"0c5c2c5666d55f4cc1f87f8f423ddb60b13aa52a5d896b6005071fd56b170c51","record_no_max":11625,"record_no_min":11026},
+  "C07": {"fullrow_sha256":"8c26315fef5feb9b06b669f56d3e41818c5ffe0e367f6e5089e6aefe7551f2e4","identity_sha256":"4d2cd7f5c2f315d1d3f4fe2e6b7d0a94c5a3fe6177b6c5dda63dc079186a9d2a","record_no_max":11025,"record_no_min":10426},
+  "C08": {"fullrow_sha256":"a875cd41d0b33d673cac0bee7fbd00d3e3268eb84a902e5f3e2c834c5a29f6e3","identity_sha256":"f1e17f523ab1493ba1821c8c72a339210da4238f7bb93a3133b721a9dfba8f03","record_no_max":10425,"record_no_min":9826},
+  "C09": {"fullrow_sha256":"8e0620386a367b166c5f30774fec0f43f3b5ccc0299fd18c30f2c172c67ffad4","identity_sha256":"774163524917a945d5981bae75a80aec53cdc23df25df2e6026f886ff437991c","record_no_max":9825,"record_no_min":9226},
+  "C10": {"fullrow_sha256":"2eb4797148b714649c489ae58308fb7f36a37934301a6911d45bdeb1e3e34d8b","identity_sha256":"f5b6b200e2cecdad7d1f8a17b1a8dace88cd5dcf4f210087f2be9cbddcb3f866","record_no_max":9225,"record_no_min":8626},
+  "C11": {"fullrow_sha256":"9f6d458ca657c82ee6b57b3732741f1984f905f41fca039955aa42c27176dc39","identity_sha256":"7ce42065c5224a052983ce45ec9ae27d391b1ab5556dfe6ace07286ebb9ac6b0","record_no_max":8625,"record_no_min":8026},
+  "C12": {"fullrow_sha256":"f23c0fef91bfb55dd512913c12fc382a2db672420cf80df277eff424b86e3b8b","identity_sha256":"71f5d246a8b8b2789829e939162a2a697aac6337d8e974d6b0540bd580661eee","record_no_max":8025,"record_no_min":7426},
+  "C13": {"fullrow_sha256":"3376bf8204fdff5544ff727895c4505157512bf50bcfb68f005c016030e65a4e","identity_sha256":"338cfee215e2bf565331e3487a17366beeb3dbc8cb8cd20316f39468cf4e686f","record_no_max":7425,"record_no_min":6826},
+  "C14": {"fullrow_sha256":"a6e6c7fb83ca5d1746f8a6b6ddf62738fcda5a6d71cd19479655fd4f2803f9a9","identity_sha256":"4598391760bbe7c3c61a8ee1523efda90dcdf20bd2d12c5608b5aeddd75829e5","record_no_max":6825,"record_no_min":6226},
+  "C15": {"fullrow_sha256":"922c45bfded6807c2f80557f99b4a02f77d9698cb282c0ee394af2c80be077d6","identity_sha256":"0858018834f4a0a680a6e90394f3af2d4cb1d01f493f2e329403e7cc5cd33627","record_no_max":6225,"record_no_min":5626},
+  "C16": {"fullrow_sha256":"0baacf3947b43f32fef7cfe1f58267bbc44664ce106e4433fe29828a448aafa9","identity_sha256":"a8cb5e2ebca4b191380b95f00da6d15f4d5532f469abab807e2a34e2ee94f50a","record_no_max":5625,"record_no_min":5026},
+  "C17": {"fullrow_sha256":"2fc2511f431dd259da86ca05e3919acebdef3d53be200b41fc822aeb80240690","identity_sha256":"8af020aabd80fba844ef307e135fda2d568e2a4a84764180d57e2742c4c948ce","record_no_max":5025,"record_no_min":4426},
+  "C18": {"fullrow_sha256":"07af06345e4f430a2d37d7aa7c186fe4c72162982d98537ffdb990bc4ce0ec1d","identity_sha256":"b65ea44d355c1511ec355437851e5b3b8a9af60ffb40cef100bc87525b6123fc","record_no_max":4425,"record_no_min":3826},
+  "C19": {"fullrow_sha256":"01d36f333f7596f60eb68c6ed21246e3ad8c75e00091c57797e0bb9da968d828","identity_sha256":"db85783b677001a46aabef477a552fd51cd3ab05e624f66adae6cfaac60a756d","record_no_max":3825,"record_no_min":3226},
+  "C20": {"fullrow_sha256":"e285d3b7a49c5b080ba28b96b033a4f6b825c9b22409790df97b294a1495851d","identity_sha256":"ff157c546f97049f0d4b98e2a904db3ce77ce8b34e946cfed4570e5126c63fde","record_no_max":3225,"record_no_min":2626},
+  "C21": {"fullrow_sha256":"5fdd51f2edb91d52f8aa55ba95e80a56f83ab3d5430d3c61d3f5b63cce364159","identity_sha256":"5750c78eef6f1d91e1683c829cb750b0a67a9b93c3eea621d0dad371a9245139","record_no_max":2625,"record_no_min":2026},
+  "C22": {"fullrow_sha256":"2cfa94411d1ff4607b97e390e79c3183d5a85514f62f75f8b89847cda101909a","identity_sha256":"d52fd8dba56da72f77ed7f5ab7ea4240dc968c1afec0402b7e9495660f42d7c4","record_no_max":2025,"record_no_min":1426},
+  "C23": {"fullrow_sha256":"296f00d934e2a5cd1820d24d28d2c836777c9a9454c8ac0f33390c1715f44015","identity_sha256":"a0c9fa07427f9e86417d03626610d37c54a49cf72c8b3901f511327945d885b9","record_no_max":1425,"record_no_min":826},
+  "C24": {"fullrow_sha256":"66512f427fb937698ef0c1506f89fb340df390b71a564694b421e921d39ee487","identity_sha256":"0d9bd1d9e4805bdd7cd6ee05c57148e78c76ea68df2f692e2d454c9d23ad4bc5","record_no_max":825,"record_no_min":226}
+}
