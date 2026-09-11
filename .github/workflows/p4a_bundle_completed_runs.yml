@@ -1,0 +1,52 @@
+name: P4-A bundle completed collection runs
+on:
+  workflow_run:
+    workflows:
+      - 'TEMP P4-A public runner full matrix v4'
+      - 'P4-A repair failed chunks batch1'
+      - 'P4-A repair ROC91 L chunks'
+    types: [completed]
+permissions:
+  actions: read
+  contents: read
+jobs:
+  bundle:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all successful artifacts from source run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          REPO: ${{ github.repository }}
+        run: |
+          mkdir -p bundle
+          gh run download "$RUN_ID" -R "$REPO" -D bundle || true
+          find bundle -type f -maxdepth 3 -print | sort
+      - name: Build bundle index and zip
+        env:
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          SOURCE_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          SOURCE_NAME: ${{ github.event.workflow_run.name }}
+        run: |
+          python - <<'PY'
+          import hashlib, json, os, pathlib, zipfile
+          root=pathlib.Path('bundle')
+          files=[]
+          for p in sorted(root.rglob('*')):
+              if p.is_file():
+                  b=p.read_bytes()
+                  files.append({'path':str(p.relative_to(root)),'bytes':len(b),'sha256':hashlib.sha256(b).hexdigest()})
+          idx={'schema':'p4a_collection_run_bundle_v1','source_run_id':int(os.environ['RUN_ID']),'source_workflow':os.environ['SOURCE_NAME'],'source_conclusion':os.environ['SOURCE_CONCLUSION'],'file_count':len(files),'files':files}
+          (root/'BUNDLE_INDEX.json').write_text(json.dumps(idx,ensure_ascii=False,indent=2,sort_keys=True)+'\n',encoding='utf-8')
+          out=pathlib.Path(f"P4A-COLLECTION-RUN-{os.environ['RUN_ID']}-BUNDLE.zip")
+          with zipfile.ZipFile(out,'w',zipfile.ZIP_DEFLATED) as z:
+              for p in sorted(root.rglob('*')):
+                  if p.is_file(): z.write(p,p.relative_to(root.parent))
+          print(out, out.stat().st_size, hashlib.sha256(out.read_bytes()).hexdigest())
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: p4a-collection-run-${{ github.event.workflow_run.id }}-bundle
+          path: P4A-COLLECTION-RUN-${{ github.event.workflow_run.id }}-BUNDLE.zip
+          if-no-files-found: error
+          retention-days: 2
