@@ -88,97 +88,4 @@ def fullrow_sha(rows):
     def line(r): return '|'.join([str(int(r['record_no'])),r.get('dataserno') or '',r['published_date'],r['record_identity'],r['resource_kind'],r.get('unit') or '',r.get('title') or '',r.get('url') or ''])+'\n'
     return hashlib.sha256(''.join(line(r) for r in sorted(rows,key=lambda x:int(x['record_no']))).encode('utf-8')).hexdigest()
 
-def reconstruct_chunk(chunk):
-    lo,hi,exp_identity,exp_fullrow=CHUNKS[chunk]
-    first=fetch_page(1); tr=first['total_records']; tp=first['total_pages']
-    if not tr or not tp or tr<FROZEN_TOTAL: raise RuntimeError(f'current archive smaller than frozen: {tr}/{tp}')
-    delta=tr-FROZEN_TOTAL
-    cur_lo,cur_hi=lo+delta,hi+delta
-    p_lo=(cur_lo-1)//15+1; p_hi=(cur_hi-1)//15+1
-    pages={1:first} if 1>=p_lo and 1<=p_hi else {}
-    targets=[p for p in range(p_lo,p_hi+1) if p not in pages]
-    with cf.ThreadPoolExecutor(max_workers=4) as ex:
-        futs=[ex.submit(fetch_page,p) for p in targets]
-        for f in cf.as_completed(futs):
-            r=f.result(); pages[r['page']]=r
-    current=[]
-    for p in range(p_lo,p_hi+1):
-        r=pages[p]
-        if r['total_records']!=tr or r['total_pages']!=tp: raise RuntimeError(f'snapshot drift page {p}')
-        current.extend(r['rows'])
-    candidate=[]
-    for r in current:
-        if not (cur_lo<=r['current_no']<=cur_hi): continue
-        old_no=r['current_no']-delta
-        x={k:v for k,v in r.items() if k!='current_no'}
-        x.update({'record_no':old_no,'source_page':(old_no-1)//15+1,'record_identity':('dataserno:'+r['hataserno']) if r.get('dataserno') else ('record_no:'+str(old_no))})
-        candidate.append(x)
-    candidate.sort(key=lambda x:x['record_no'])
-    expected_ids=list(range(lo,hi+1)); got_ids=[x['record_no'] for x in candidate]
-    if got_ids!=expected_ids: raise RuntimeError(f'{chunk} record number reconstruction mismatch')
-    got_identity=identity_sha(candidate); got_fullrow=fullrow_sha(candidate)
-    if got_identity!=exp_identity: raise RuntimeError(f'{chunk} identity SHA mismatch {got_identity}')
-    if got_fullrow!=exp_fullrow: raise RuntimeError(f'{chunk} full-row SHA mismatch {got_fullrow}')
-    return candidate,{'current_total_records':tr,'current_total_pages':tp,'prepend_delta':delta,'current_page_low':p_lo,'current_page_high':p_hi,'expected_identity_sha256':exp_identity,'captured_identity_sha256':got_identity,'expected_fullrow_sha256':exp_fullrow,'captured_fullrow_sha256':got_fullrow}
-
-def fetch_one(r,attempts,base_sleep=1):
-    last=None
-    for a in range(attempts):
-        try:
-            req=urllib.request.Request(r['url'],headers={'User-Agent':UA,'Accept':'*/*','Connection':'close'})
-            with urllib.request.urlopen(req,timeout=120) as resp:
-                body=resp.read(); st=getattr(resp,'status',None); final=resp.geturl(); hdr=dict(resp.headers.items()); got=nowz()
-            if st==200 and body:
-                ct=(hdr.get('Content-Type') or '').lower()
-                if r['resource_kind']=='DIRECT_DOCUMENT' and len(body)<64: raise RuntimeError('direct document too small')
-                if r['resource_kind']=='HTML_DETAIL' and ('html' not in ct and not body.lstrip().startswith(b'<')): raise RuntimeError('expected html detail')
-                return {'ok':True,'r':r,'body':body,'status':st,'final_url':final,'headers':hdr,'retrieved_at':got,'attempts':a+1}
-            last=f'http_status={st} bytes={len(body)}'
-        except Exception as exc: last=repr(exc)
-        if a+1<attempts: time.sleep(min(30,base_sleep*(2**a)))
-    return {'ok':False,'r':r,'error':last,'attempts':attempts,'failed_at':nowz()}
-
-def save_success(root,res):
-    r=res['r']; body=res['body']; hdr=res['headers']; ct=(hdr.get('Content-Type') or '').lower()
-    ext='.html' if r['resource_kind']=='HTML_DETAIL' else ('.pdf' if body.startswith(b'%PDF') or 'pdf' in ct else '.bin')
-    rid=r.get('dataserno') or f"record{int(r['record_no']):05d}"
-    stem=f"{int(r['source_page']):04d}_{int(r['record_no']):05d}_{r['published_date']}_{rid}"
-    rp=root/'detail'/(stem+'.response'+ext); mp=root/'meta'/(stem+'.capture.json'); rp.write_bytes(body)
-    meta={'schema':'p4b_exact_http_capture_v1','lane_code':'P4-B','dataset':'FINANCIAL_NEWS_EVENTS','work_unit_id':f"P4B-FSC-PAGE-{int(r['source_page']):04d}",'source_family':FAMILY,'source_contract_version':CONTRACT,'recovery_collector_version':RECOVERY,'method':'GET','request_url':r['url'],'final_url':res['final_url'],'retrieved_at':res['retrieved_at'],'http_status':res['status'],'response_headers':hdr,'payload_bytes':len(body),'payload_sha256':sha_bytes(body),'source_page':r['source_page'],'record_no':r['record_no'],'dataserno':r.get('dataserno'),'record_identity':r['record_identity'],'resource_kind':r['resource_kind'],'published_date':r['published_date'],'published_date_source':'FSC frozen archive list row reconstructed only after frozen identity/full-row hash gate','available_at':'unknown','available_at_reason':'historical archive migration/public-web availability time not proven by page','unit':r['unit'],'title':r['title'],'raw_semantics':'exact FSC linked resource HTTP response bytes','classification':'FORMAL_RAW_CANDIDATE_PENDING_DRIVE_READBACK','recovery_attempts_used':res['attempts'],'transport':'isolated public hosted runner; catalog content never committed'}
-    mp.write_text(json.dumps(meta,ensure_ascii=False,indent=2,sort_keys=True)+'\n')
-    return {'record_no':r['record_no'],'source_page':r['source_page'],'dataserno':r.get('dataserno'),'record_identity':r['record_identity'],'resource_kind':r['resource_kind'],'published_date':r['published_date'],'raw_path':str(rp.relative_to(root)),'raw_bytes':len(body),'raw_sha256':sha_bytes(body),'metadata_path':str(mp.relative_to(root)),'recovery_attempts_used':res['attempts']}
-
-def run(chunk,outbase):
-    recs,gate=reconstruct_chunk(chunk)
-    outbase=pathlib.Path(outbase); outbase.mkdir(parents=True,exist_ok=True)
-    staging=outbase/'.staging'/f'{chunk}-{uuid.uuid4().hex}'; root=staging/'payload'; (root/'detail').mkdir(parents=True); (root/'meta').mkdir()
-    first=[]
-    with cf.ThreadPoolExecutor(max_workers=2) as pool:
-        futs=[pool.submit(fetch_one,r,4,1) for r in recs]
-        for f in cf.as_completed(futs): first.append(f.result())
-    successes=[x for x in first if x['ok']]; failed=[x for x in first if not x['ok']]
-    retry=[fetch_one(x['r'],8,2) for x in failed]; successes += [x for x in retry if x['ok']]; final_failed=[x for x in retry if not x['ok']]
-    rows=[save_success(root,x) for x in sorted(successes,key=lambda y:int(y['r']['record_no']))]
-    failures=[{'record_no':x['r']['record_no'],'source_page':x['r']['source_page'],'dataserno':x['r'].get('dataserno'),'record_identity':x['r']['record_identity'],'resource_kind':x['r']['resource_kind'],'published_date':x['r']['published_date'],'title':x['r']['title'],'url':x['r']['url'],'error':x['error'],'deep_retry_attempts':x['attempts']} for x in final_failed]
-    exp_identity=CHUNKS[chunk][2]; captured_identity=identity_sha([{'record_no':x['record_no'],'dataserno':x.get('dataserno'),'published_date':x['published_date'],'record_identity':x['record_identity']} for x in rows]) if rows else None
-    complete=(not failures and len(rows)==len(recs) and captured_identity==exp_identity)
-    manifest={'schema':'p4b_fsc_recovery_chunk_manifest_v4','lane_code':'P4-B','dataset':'FINANCIAL_NEWS_EVENTS','source_family':FAMILY,'source_contract_version':CONTRACT,'recovery_collector_version':RECOVERY,'chunk':chunk,'frozen_catalog_reconstruction_gate':gate,'expected_record_count':len(recs),'captured_record_count':len(rows),'failure_count':len(failures),'record_no_min':CHUNKS[chunk][0],'record_no_max':CHUNKS[chunk][1],'expected_identity_sha256':exp_identity,'captured_identity_sha256':captured_identity,'identity_match':captured_identity==exp_identity,'raw_bytes':sum(x['raw_bytes'] for x in rows),'records':rows,'failures':failures,'status':'CAPTURED_VALIDATED_PENDING_DRIVE_READBACK' if complete else 'STAGING_INCOMPLETE_NOT_FORMAL_RAW','generated_at':nowz()}
-    (root/f'P4B_FSC_RECOVERY_{chunk}_MANIFEST.json').write_text(json.dumps(manifest,ensure_ascii=False,indent=2,sort_keys=True)+'\n')
-    if not complete:
-        faildir=outbase/'failures'; faildir.mkdir(exist_ok=True)
-        (faildir/f'P4B_FSC_RECOVERY_{chunk}_FAILURE.json').write_text(json.dumps({'chunk':chunk,'gate':gate,'manifest':manifest},ensure_ascii=Falslindent=2,sort_keys=True)+'\n')
-        shutil.rmtree(staging, ignore_errors=True)
-        print(json.dumps({'chunk':chunk,'status':'INCOMPLETE','captured':len(rows),'failures':len(failures)},ensure_ascii=False)); return 2
-    packages=outbase/'packages'; packages.mkdir(exist_ok=True)
-    tmp=packages/f'.{chunk}.{uuid.uuid4().hex}.tmp.zip'
-    with zipfile.ZipFile(tmp,'w',zipfile.ZIP_DEFLATED,compresslevel=6) as z:
-        for p in sorted(root.rglob('*')):
-            if p.is_file(): z.write(p,p.relative_to(root))
-    zp=packages/f'P4B_FSC_RECOVERY_{chunk}_V4.zip'; os.replace(tmp,zp)
-    receipt={'schema':'p4b_local_package_receipt_v1','chunk':chunk,'package':zp.name,'bytes':zp.stat().st_size,'sha256':sha_file(zp),'record_count':len(rows),'identity_sha256':captured_identity,'fullrow_catalog_sha256':gate['captured_fullrow_sha256'],'status':'CAPTURED_VALIDATED_PENDING_DRIVE_READBACK','generated_at':nowz()}
-    (packages/f'P4B_FSC_RECOVERY_{chunk}_V4_RECEIPT.json').write_text(json.dumps(receipt,ensure_ascii=False,indent=2,sort_keys=True)+'\n')
-    shutil.rmtree(staging,ignore_errors=True); print(json.dumps(receipt,ensure_ascii=False)); return 0
-
-def main():
-    ap=argparse.ArgumentParser(); ap.add_argument('chunk',choices=sorted(CHUNKS)); ap.add_argument('--out-dir',default='out'); ns=ap.parse_args(); raise SystemExit(run(ns.chunk,ns.out_dir))
-if __name__=='__main__': main()
+def recon²È="25Ñå}Í¡„ÈÔØœé•áÁ}¥‘•¹Ñ¥Ñä°…ÁÑÕÉ•‘}¥‘•¹Ñ¥Ñå}Í¡„ÈÔØœé½Ñ}¥‘•¹Ñ¥Ñä°•áÁ•Ñ•‘}™Õ±±É½Ý}Í¡„ÈÔØœé•áÁ}™Õ±±É½Ü°…ÁÑÕÉ•‘}™Õ±±É½Ý}Í¡„ÈÔØœé½Ñ}™Õ±±É½Ýô()‘•˜™•Ñ¡}½¹”¡È±…ÑÑ•µÁÑÌ±‰…Í•}Í±••ÀôÄ¤è(€€€±…ÍÐõ9½¹”(€€€™½È„¥¸É…¹”¡…ÑÑ•µÁÑÌ¤è(€€€€€€€ÑÉäè(€€€€€€€€€€€É•ÄõÕÉ±±¥ˆ¹É•ÅÕ•ÍÐ¹I•ÅÕ•ÍÐ¡ÉlÕÉ°t±¡•…‘•ÉÌõìUÍ•Èµ•¹ÐœéU°•ÁÐœèœ¨¼¨œ°½¹¹•Ñ¥½¸œè±½Í”ô¤(€€€€€€€€€€€Ý¥Ñ ÕÉ±±¥ˆ¹É•ÅÕ•ÍÐ¹ÕÉ±½Á•¸¡É•Ä±Ñ¥µ•½ÕÐôÄÈÀ¤…ÌÉ•ÍÀè(€€€€€€€€€€€€€€€‰½‘äõÉ•ÍÀ¹É•… ¤ìÍÐõ•Ñ…ÑÑÈ¡É•ÍÀ°ÍÑ…ÑÕÌœ±9½¹”¤ì™¥¹…°õÉ•ÍÀ¹•ÑÕÉ° ¤ì¡‘Èõ‘¥Ð¡É•ÍÀ¹¡•…‘•ÉÌ¹¥Ñ•µÌ ¤¤ì½Ðõ¹½Ýè ¤(€€€€€€€€€€€¥˜ÍÐôôÈÀÀ…¹‰½‘äè(€€€€€€€€€€€€€€€Ðô¡¡‘È¹•Ð ½¹Ñ•¹ÐµQåÁ”œ¤½È€œœ¤¹±½Ý•È ¤(€€€€€€€€€€€€€€€¥˜ÉlÉ•Í½ÕÉ•}­¥¹tôô%IQ}=U59Pœ…¹±•¸¡‰½‘ä¤ðØÐèÉ…¥Í”IÕ¹Ñ¥µ•ÉÉ½È ‘¥É•Ð‘½Õµ•¹ÐÑ½¼Íµ…±°œ¤(€€€€€€€€€€€€€€€¥˜ÉlÉ•Í½ÕÉ•}­¥¹tôô!Q51}Q%0œ…¹€ ¡Ñµ°œ¹½Ð¥¸Ð…¹¹½Ð‰½‘ä¹±ÍÑÉ¥À ¤¹ÍÑ…ÉÑÍÝ¥Ñ ¡ˆœðœ¤¤èÉ…¥Í”IÕ¹Ñ¥µ•ÉÉ½È •áÁ•Ñ•¡Ñµ°‘•Ñ…¥°œ¤(€€€€€€€€€€€€€€€É•ÑÕÉ¸ì½¬œéQÉÕ”°ÈœéÈ°‰½‘äœé‰½‘ä°ÍÑ…ÑÕÌœéÍÐ°™¥¹…±}ÕÉ°œé™¥¹…°°¡•…‘•ÉÌœé¡‘È°É•ÑÉ¥•Ù•‘}…Ðœé½Ð°…ÑÑ•µÁÑÌœé„¬Åô(€€€€€€€€€€€±…ÍÐõ˜¡ÑÑÁ}ÍÑ…ÑÕÌõíÍÑô‰åÑ•Ìõí±•¸¡‰½‘ä¥ôœ(€€€€€€€•á•ÁÐá•ÁÑ¥½¸…Ì•áŒè±…ÍÐõÉ•ÁÈ¡•áŒ¤(€€€€€€€¥˜„¬Äñ…ÑÑ•µÁÑÌèÑ¥µ”¹Í±••À¡µ¥¸ ÌÀ±‰…Í•}Í±••À¨ È¨©„¤¤¤(€€€É•ÑÕÉ¸ì½¬œé…±Í”°ÈœéÈ°•ÉÉ½Èœé±…ÍÐ°…ÑÑ•µÁÑÌœé…ÑÑ•µÁÑÌ°™…¥±•‘}…Ðœé¹½Ýè ¥ô()‘•˜Í…Ù•}ÍÕ•ÍÌ¡É½½Ð±É•Ì¤è(€€€ÈõÉ•ÍlÈtì‰½‘äõÉ•Íl‰½‘ätì¡‘ÈõÉ•Íl¡•…‘•ÉÌtìÐô¡¡‘È¹•Ð ½¹Ñ•¹ÐµQåÁ”œ¤½È€œœ¤¹±½Ý•È ¤(€€€•áÐôœ¹¡Ñµ°œ¥˜ÉlÉ•Í½ÕÉ•}­¥¹tôô!Q51}Q%0œ•±Í”€ œ¹Á‘˜œ¥˜‰½‘ä¹ÍÑ…ÉÑÍÝ¥Ñ ¡ˆœ•Aœ¤½È€Á‘˜œ¥¸Ð•±Í”€œ¹‰¥¸œ¤(€€€É¥õÈ¹•Ð ‘…Ñ…Í•É¹¼œ¤½È˜‰É•½É‘í¥¹Ð¡ÉlÉ•½É‘}¹¼t¤èÀÕ‘ôˆ(€€€ÍÑ•´õ˜‰í¥¹Ð¡ÉlÍ½ÕÉ•}Á…”t¤èÀÑ‘õ}í¥¹Ð¡ÉlÉ•½É‘}¹¼t¤èÀÕ‘õ}íÉlÁÕ‰±¥Í¡•‘}‘…Ñ”uõ}íÉ¥‘ôˆ(€€€ÉÀõÉ½½Ð¼‘•Ñ…¥°œ¼¡ÍÑ•´¬œ¹É•ÍÁ½¹Í”œ­•áÐ¤ìµÀõÉ½½Ð¼µ•Ñ„œ¼¡ÍÑ•´¬œ¹…ÁÑÕÉ”¹©Í½¸œ¤ìÉÀ¹ÝÉ¥Ñ•}‰åÑ•Ì¡‰½‘ä¤(€€€µ•Ñ„õìÍ¡•µ„œèÀÑ‰}•á…Ñ}¡ÑÑÁ}…ÁÑÕÉ•}ØÄœ°±…¹•}½‘”œè@Ðµœ°‘…Ñ…Í•Ðœè%99%1}9]M}Y9QLœ°Ý½É­}Õ¹¥Ñ}¥œé˜‰@ÑµMµAµí¥¹Ð¡ÉlÍ½ÕÉ•}Á…”t¤èÀÑ‘ôˆ°Í½ÕÉ•}™…µ¥±äœé5%1d°Í½ÕÉ•}½¹ÑÉ…Ñ}Ù•ÉÍ¥½¸œé=9QIP°É•½Ù•Éå}½±±•Ñ½É}Ù•ÉÍ¥½¸œéI=YId°µ•Ñ¡½œèPœ°É•ÅÕ•ÍÑ}ÕÉ°œéÉlÕÉ°t°™¥¹…±}ÕÉ°œéÉ•Íl™¥¹…±}ÕÉ°t°É•ÑÉ¥•Ù•‘}…ÐœéÉ•ÍlÉ•ÑÉ¥•Ù•‘}…Ðt°¡ÑÑÁ}ÍÑ…ÑÕÌœéÉ•ÍlÍÑ…ÑÕÌt°É•ÍÁ½¹Í•}¡•…‘•ÉÌœé¡‘È°Á…å±½…‘}‰åÑ•Ìœé±•¸¡‰½‘ä¤°Á…å±½…‘}Í¡„ÈÔØœéÍ¡…}‰åÑ•Ì¡‰½‘ä¤°Í½ÕÉ•}Á…”œéÉlÍ½ÕÉ•}Á…”t°É•½É‘}¹¼œéÉlÉ•½É‘}¹¼t°‘…Ñ…Í•É¹¼œéÈ¹•Ð ‘…Ñ…Í•É¹¼œ¤°É•½É‘}¥‘•¹Ñ¥ÑäœéÉlÉ•½É‘}¥‘•¹Ñ¥Ñät°É•Í½ÕÉ•}­¥¹œéÉlÉ•Í½ÕÉ•}­¥¹t°ÁÕ‰±¥Í¡•‘}‘…Ñ”œéÉlÁÕ‰±¥Í¡•‘}‘…Ñ”t°ÁÕ‰±¥Í¡•‘}‘…Ñ•}Í½ÕÉ”œèM™É½é•¸…É¡¥Ù”±¥ÍÐÉ½ÜÉ•½¹ÍÑÉÕÑ•½¹±ä…™Ñ•È™É½é•¸¥‘•¹Ñ¥Ñä½™Õ±°µÉ½Ü¡…Í …Ñ”œ°…Ù…¥±…‰±•}…ÐœèÕ¹­¹½Ý¸œ°…Ù…¥±…‰±•}…Ñ}É•…Í½¸œè¡¥ÍÑ½É¥…°…É¡¥Ù”µ¥É…Ñ¥½¸½ÁÕ‰±¥ŒµÝ•ˆ…Ù…¥±…‰¥±¥ÑäÑ¥µ”¹½ÐÁÉ½Ù•¸‰äÁ…”œ°Õ¹¥ÐœéÉlÕ¹¥Ðt°Ñ¥Ñ±”œéÉlÑ¥Ñ±”t°É…Ý}Í•µ…¹Ñ¥Ìœè•á…ÐM±¥¹­•É•Í½ÕÉ”!QQ@É•ÍÁ½¹Í”‰åÑ•Ìœ°±…ÍÍ¥™¥…Ñ¥½¸œè=I51}I]}9%Q}A9%9}I%Y}I	,œ°É•½Ù•Éå}…ÑÑ•µÁÑÍ}ÕÍ•œéÉ•Íl…ÑÑ•µÁÑÌt°ÑÉ…¹ÍÁ½ÉÐœè¥Í½±…Ñ•ÁÕ‰±¥Œ¡½ÍÑ•ÉÕ¹¹•Èì…Ñ…±½œ½¹Ñ•¹Ð¹•Ù•È½µµ¥ÑÑ•ô(€€€µÀ¹ÝÉ¥Ñ•}Ñ•áÐ¡©Í½¸¹‘ÕµÁÌ¡µ•Ñ„±•¹ÍÕÉ•}…Í¥¤õ…±Í”±¥¹‘•¹ÐôÈ±Í½ÉÑ}­•åÌõQÉÕ”¤¬q¸œ¤(€€€É•ÑÕÉ¸ìÉ•½É‘}¹¼œéÉlÉ•½É‘}¹¼t°Í½ÕÉ•}Á…”œéÉlÍ½ÕÉ•}Á…”t°‘…Ñ…Í•É¹¼œéÈ¹•Ð ‘…Ñ…Í•É¹¼œ¤°É•½É‘}¥‘•¹Ñ¥ÑäœéÉlÉ•½É‘}¥‘•¹Ñ¥Ñät°É•Í½ÕÉ•}­¥¹œéÉlÉ•Í½ÕÉ•}­¥¹t°ÁÕ‰±¥Í¡•‘}‘…Ñ”œéÉlÁÕ‰±¥Í¡•‘}‘…Ñ”t°É…Ý}Á…Ñ œéÍÑÈ¡ÉÀ¹É•±…Ñ¥Ù•}Ñ¼¡É½½Ð¤¤°É…Ý}‰åÑ•Ìœé±•¸¡‰½‘ä¤°É…Ý}Í¡„ÈÔØœéÍ¡…}‰åÑ•Ì¡‰½‘ä¤°µ•Ñ…‘…Ñ…}Á…Ñ œéÍÑÈ¡µÀ¹É•±…Ñ¥Ù•}Ñ¼¡É½½Ð¤¤°É•½Ù•Éå}…ÑÑ•µÁÑÍ}ÕÍ•œéÉ•Íl…ÑÑ•µÁÑÌuô()‘•˜ÉÕ¸¡¡Õ¹¬±½ÕÑ‰…Í”¤è(€€€É•Ì±…Ñ”õÉ•½¹ÍÑÉÕÑ}¡Õ¹¬¡¡Õ¹¬¤(€€€½ÕÑ‰…Í”õÁ…Ñ¡±¥ˆ¹A…Ñ ¡½ÕÑ‰…Í”¤ì½ÕÑ‰…Í”¹µ­‘¥È¡Á…É•¹ÑÌõQÉÕ”±•á¥ÍÑ}½¬õQÉÕ”¤(€€€ÍÑ…¥¹œõ½ÕÑ‰…Í”¼œ¹ÍÑ…¥¹œœ½˜í¡Õ¹­ôµíÕÕ¥¹ÕÕ¥Ð ¤¹¡•áôœìÉ½½ÐõÍÑ…¥¹œ¼Á…å±½…œì€¡É½½Ð¼‘•Ñ…¥°œ¤¹µ­‘¥È¡Á…É•¹ÑÌõQÉÕ”¤ì€¡É½½Ð¼µ•Ñ„œ¤¹µ­‘¥È ¤(€€€™¥ÉÍÐõmt(€€€Ý¥Ñ ˜¹Q¡É•…‘A½½±á•ÕÑ½È¡µ…á}Ý½É­•ÉÌôÈ¤…ÌÁ½½°è(€€€€€€€™ÕÑÌõmÁ½½°¹ÍÕ‰µ¥Ð¡™•Ñ¡}½¹”±È°Ð°Ä¤™½ÈÈ¥¸É•Ít(€€€€€€€™½È˜¥¸˜¹…Í}½µÁ±•Ñ•¡™ÕÑÌ¤è™¥ÉÍÐ¹…ÁÁ•¹¡˜¹É•ÍÕ±Ð ¤¤(€€€ÍÕ•ÍÍ•Ìõmà™½Èà¥¸™¥ÉÍÐ¥˜ál½¬utì™…¥±•õmà™½Èà¥¸™¥ÉÍÐ¥˜¹½Ðál½¬ut(€€€É•ÑÉäõm™•Ñ¡}½¹”¡álÈt°à°È¤™½Èà¥¸™…¥±•‘tìÍÕ•ÍÍ•Ì€¬ômà™½Èà¥¸É•ÑÉä¥˜ál½¬utì™¥¹…±}™…¥±•õmà™½Èà¥¸É•ÑÉä¥˜¹½Ðál½¬ut(€€€É½ÝÌõmÍ…Ù•}ÍÕ•ÍÌ¡É½½Ð±à¤™½Èà¥¸Í½ÉÑ•¡ÍÕ•ÍÍ•Ì±­•äõ±…µ‰‘„äé¥¹Ð¡ålÈulÉ•½É‘}¹¼t¤¥t(€€€™…¥±ÕÉ•ÌõmìÉ•½É‘}¹¼œéálÈulÉ•½É‘}¹¼t°Í½ÕÉ•}Á…”œéálÈulÍ½ÕÉ•}Á…”t°‘…Ñ…Í•É¹¼œéálÈt¹•Ð ‘…Ñ…Í•É¹¼œ¤°É•½É‘}¥‘•¹Ñ¥ÑäœéálÈulÉ•½É‘}¥‘•¹Ñ¥Ñät°É•Í½ÕÉ•}­¥¹œéálÈulÉ•Í½ÕÉ•}­¥¹t°ÁÕ‰±¥Í¡•‘}‘…Ñ”œéálÈulÁÕ‰±¥Í¡•‘}‘…Ñ”t°Ñ¥Ñ±”œéálÈulÑ¥Ñ±”t°ÕÉ°œéálÈulÕÉ°t°•ÉÉ½Èœéál•ÉÉ½Èt°‘••Á}É•ÑÉå}…ÑÑ•µÁÑÌœéál…ÑÑ•µÁÑÌuô™½Èà¥¸™¥¹…±}™…¥±•‘t(€€€•áÁ}¥‘•¹Ñ¥Ñäõ!U9-Mm¡Õ¹­ulÉtì…ÁÑÕÉ•‘}¥‘•¹Ñ¥Ñäõ¥‘•¹Ñ¥Ñå}Í¡„¡mìÉ•½É‘}¹¼œéálÉ•½É‘}¹¼t°‘…Ñ…Í•É¹¼œéà¹•Ð ‘…Ñ…Í•É¹¼œ¤°ÁÕ‰±¥Í¡•‘}‘…Ñ”œéálÁÕ‰±¥Í¡•‘}‘…Ñ”t°É•½É‘}¥‘•¹Ñ¥ÑäœéálÉ•½É‘}¥‘•¹Ñ¥Ñäuô™½Èà¥¸É½ÝÍt¤¥˜É½ÝÌ•±Í”9½¹”(€€€½µÁ±•Ñ”ô¡¹½Ð™…¥±ÕÉ•Ì…¹±•¸¡É½ÝÌ¤ôõ±•¸¡É•Ì¤…¹…ÁÑÕÉ•‘}¥‘•¹Ñ¥Ñäôõ•áÁ}¥‘•¹Ñ¥Ñä¤(€€€µ…¹¥™•ÍÐõìÍ¡•µ„œèÀÑ‰}™Í}É•½Ù•Éå}¡Õ¹­}µ…¹¥™•ÍÑ}ØÐœ°±…¹•}½‘”œè@Ðµœ°‘…Ñ…Í•Ðœè%99%1}9]M}Y9QLœ°Í½ÕÉ•}™…µ¥±äœé5%1d°Í½ÕÉ•}½¹ÑÉ…Ñ}Ù•ÉÍ¥½¸œé=9QIP°É•½Ù•Éå}½±±•Ñ½É}Ù•ÉÍ¥½¸œéI=YId°¡Õ¹¬œé¡Õ¹¬°™É½é•¹}…Ñ…±½}É•½¹ÍÑÉÕÑ¥½¹}…Ñ”œé…Ñ”°•áÁ•Ñ•‘}É•½É‘}½Õ¹Ðœé±•¸¡É•Ì¤°…ÁÑÕÉ•‘}É•½É‘}½Õ¹Ðœé±•¸¡É½ÝÌ¤°™…¥±ÕÉ•}½Õ¹Ðœé±•¸¡™…¥±ÕÉ•Ì¤°É•½É‘}¹½}µ¥¸œé!U9-Mm¡Õ¹­ulÁt°É•½É‘}¹½}µ…àœé!U9-Mm¡Õ¹­ulÅt°•áÁ•Ñ•‘}¥‘•¹Ñ¥Ñå}Í¡„ÈÔØœé•áÁ}¥‘•¹Ñ¥Ñä°…ÁÑÕÉ•‘}¥‘•¹Ñ¥Ñå}Í¡„ÈÔØœé…ÁÑÕÉ•‘}¥‘•¹Ñ¥Ñä°¥‘•¹Ñ¥Ñå}µ…Ñ œé…ÁÑÕÉ•‘}¥‘•¹Ñ¥Ñäôõ•áÁ}¥‘•¹Ñ¥Ñä°É…Ý}‰åÑ•ÌœéÍÕ´¡álÉ…Ý}‰åÑ•Ìt™½Èà¥¸É½ÝÌ¤°É•½É‘ÌœéÉ½ÝÌ°™…¥±ÕÉ•Ìœé™…¥±ÕÉ•Ì°ÍÑ…ÑÕÌœèAQUI}Y1%Q}A9%9}I%Y}I	,œ¥˜½µÁ±•Ñ”•±Í”€MQ%9}%9=5A1Q}9=Q}=I51}I\œ°•¹•É…Ñ•‘}…Ðœé¹½Ýè ¥ô(€€€€¡É½½Ð½˜@Ñ	}M}I=YIe}í¡Õ¹­õ}59%MP¹©Í½¸œ¤¹ÝÉ¥Ñ•}Ñ•áÐ¡©Í½¸¹‘ÕµÁÌ¡µ…¹¥™•ÍÐ±•¹ÍÕÉ•}…Í¥¤õ…±Í”±¥¹‘•¹ÐôÈ±Í½ÉÑ}­•åÌõQÉÕ”¤¬q¸œ¤(€€€¥˜¹½Ð½µÁ±•Ñ”è(€€€€€€€™…¥±‘¥Èõ½ÕÑ‰…Í”¼™…¥±ÕÉ•Ìœì™…¥±‘¥È¹µ­‘¥È¡•á¥ÍÑ}½¬õQÉÕ”¤(€€€€€€€€¡™…¥±‘¥È½˜@Ñ	}M}I=YIe}í¡Õ¹­õ}%1UI¹©Í½¸œ¤¹ÝÉ¥Ñ•}Ñ•áÐ¡©Í½¸¹‘ÕµÁÌ¡ì¡Õ¹¬œé¡Õ¹¬°…Ñ”œé…Ñ”°µ…¹¥™•ÍÐœéµ…¹¥™•ÍÑô±•¹ÍÕÉ•}…Í¥¤õ…±Í”±¥¹‘•¹ÐôÈ±Í½ÉÑ}­•åÌõQÉÕ”¤¬q¸œ¤(€€€€€€€Í¡ÕÑ¥°¹ÉµÑÉ•”¡ÍÑ…¥¹œ±¥¹½É•}•ÉÉ½ÉÌõQÉÕ”¤(€€€€€€€ÁÉ¥¹Ð¡©Í½¸¹‘ÕµÁÌ¡ì¡Õ¹¬œé¡Õ¹¬°ÍÑ…ÑÕÌœè%9=5A1Qœ°…ÁÑÕÉ•œé±•¸¡É½ÝÌ¤°™…¥±ÕÉ•Ìœé±•¸¡™…¥±ÕÉ•Ì¥ô±•¹ÍÕÉ•}…Í¥¤õ…±Í”¤¤ìÉ•ÑÕÉ¸€È(€€€Á…­…•Ìõ½ÕÑ‰…Í”¼Á…­…•ÌœìÁ…­…•Ì¹µ­‘¥È¡•á¥ÍÑ}½¬õQÉÕ”¤(€€€ÑµÀõÁ…­…•Ì½˜œ¹í¡Õ¹­ô¹íÕÕ¥¹ÕÕ¥Ð ¤¹¡•áô¹ÑµÀ¹é¥Àœ(€€€Ý¥Ñ é¥Á™¥±”¹i¥Á¥±”¡ÑµÀ°Üœ±é¥Á™¥±”¹i%A}1Q±½µÁÉ•ÍÍ±•Ù•°ôØ¤…Ìèè(€€€€€€€™½ÈÀ¥¸Í½ÉÑ•¡É½½Ð¹É±½ˆ œ¨œ¤¤è(€€€€€€€€€€€¥˜À¹¥Í}™¥±” ¤èè¹ÝÉ¥Ñ”¡À±À¹É•±…Ñ¥Ù•}Ñ¼¡É½½Ð¤¤(€€€éÀõÁ…­…•Ì½˜@Ñ	}M}I=YIe}í¡Õ¹­õ}XÐ¹é¥Àœì½Ì¹É•Á±…”¡ÑµÀ±éÀ¤(€€€É••¥ÁÐõìÍ¡•µ„œèÀÑ‰}±½…±}Á…­…•}É••¥ÁÑ}ØÄœ°¡Õ¹¬œé¡Õ¹¬°Á…­…”œééÀ¹¹…µ”°‰åÑ•ÌœééÀ¹ÍÑ…Ð ¤¹ÍÑ}Í¥é”°Í¡„ÈÔØœéÍ¡…}™¥±”¡éÀ¤°É•½É‘}½Õ¹Ðœé±•¸¡É½ÝÌ¤°¥‘•¹Ñ¥Ñå}Í¡„ÈÔØœé…ÁÑÕÉ•‘}¥‘•¹Ñ¥Ñä°™Õ±±É½Ý}…Ñ…±½}Í¡„ÈÔØœé…Ñ•l…ÁÑÕÉ•‘}™Õ±±É½Ý}Í¡„ÈÔØt°ÍÑ…ÑÕÌœèAQUI}Y1%Q}A9%9}I%Y}I	,œ°•¹•É…Ñ•‘}…Ðœé¹½Ýè ¥ô(€€€€¡Á…­…•Ì½˜@Ñ	}M}I=YIe}í¡Õ¹­õ}XÑ}I%AP¹©Í½¸œ¤¹ÝÉ¥Ñ•}Ñ•áÐ¡©Í½¸¹‘ÕµÁÌ¡É••¥ÁÐ±•¹ÍÕÉ•}…Í¥¤õ…±Í”±¥¹‘•¹ÐôÈ±Í½ÉÑ}­•åÌõQÉÕ”¤¬q¸œ¤(€€€Í¡ÕÑ¥°¹ÉµÑÉ•”¡ÍÑ…¥¹œ±¥¹½É•}•ÉÉ½ÉÌõQÉÕ”¤ìÁÉ¥¹Ð¡©Í½¸¹‘ÕµÁÌ¡É••¥ÁÐ±•¹ÍÕÉ•}…Í¥¤õ…±Í”¤¤ìÉ•ÑÕÉ¸€À()‘•˜µ…¥¸ ¤è(€€€…Àõ…ÉÁ…ÉÍ”¹ÉÕµ•¹ÑA…ÉÍ•È ¤ì…À¹…‘‘}…ÉÕµ•¹Ð ¡Õ¹¬œ±¡½¥•ÌõÍ½ÉÑ•¡!U9-L¤¤ì…À¹…‘‘}…ÉÕµ•¹Ð œ´µ½ÕÐµ‘¥Èœ±‘•™…Õ±Ðô½ÕÐœ¤ì¹Ìõ…À¹Á…ÉÍ•}…ÉÌ ¤ìÉ…¥Í”MåÍÑ•µá¥Ð¡ÉÕ¸¡¹Ì¹¡Õ¹¬±¹Ì¹½ÕÑ}‘¥È¤¤)¥˜}}¹…µ•}|ôô}}µ…¥¹}|œèµ…¥¸ ¤(
