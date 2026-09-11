@@ -1,0 +1,32 @@
+name: W08 MOPS contract extraction v1
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/w08_mops_contract_extract_v1.yml
+
+permissions:
+  contents: read
+
+jobs:
+  extract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Extract official MOPS form and JS contract evidence
+        run: python3 w08_public_runner/w08_mops_contract_extract_v1.py
+      - name: Summarize evidence
+        if: always()
+        run: |
+          ls -lh w08_contract_extract_out || true
+          [ -f w08_contract_extract_out/CONTRACT_EVIDENCE.json ] && sha256sum w08_contract_extract_out/CONTRACT_EVIDENCE.json || true
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: w08-mops-contract-evidence-v1
+          path: w08_contract_extract_out/
+          if-no-files-found: error
+          retention-days: 7
