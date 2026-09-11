@@ -1,0 +1,39 @@
+name: W08 T146 strict XHR qualification v5
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/w08_t146_strict_xhr_probe_v5.yml
+
+permissions:
+  contents: read
+
+jobs:
+  qualify_t146:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run strict browser-semantic qualification probe
+        run: python3 w08_public_runner/w08_t146_strict_xhr_probe_v5.py
+      - name: Summarize qualification
+        if: always()
+        shell: bash
+        run: |
+          if [ -f out_w08_t146_strict_v5/PROBE.json ]; then
+            python3 - <<'PY'
+          import json
+          p=json.load(open('out_w08_t146_strict_v5/PROBE.json'))
+          print(json.dumps(p.get('assertions',{}),ensure_ascii=False,indent=2))
+          for r in p.get('results',[]): print(r['label'],r['response']['bytes'],r['markers'])
+          PY
+          fi
+      - name: Upload qualification evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: w08-t146-strict-xhr-qualification-v5
+          path: out_w08_t146_strict_v5/
+          if-no-files-found: error
+          retention-days: 7
