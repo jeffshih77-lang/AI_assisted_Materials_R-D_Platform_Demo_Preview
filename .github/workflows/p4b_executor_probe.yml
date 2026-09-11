@@ -1,0 +1,25 @@
+name: P4-B isolated executor probe
+
+on:
+  push:
+    branches:
+      - p4b-recovery-executor-20260912
+    paths:
+      - .github/workflows/p4b_executor_probe.yml
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Runner sanity
+        run: |
+          python3 --version
+          python3 - <<'PY'
+          import socket
+          print('runner_ok')
+          print(socket.gethostbyname('www.fsc.gov.tw'))
+          PY
