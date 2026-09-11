@@ -1,0 +1,38 @@
+name: P4-B FSC C25 public transport pilot v4
+
+on:
+  push:
+    branches:
+      - p4b-runner-probe-20260912
+    paths:
+      - .github/workflows/p4b_fsc_c25_pilot_v4.yml
+
+permissions:
+  contents: read
+
+jobs:
+  c25:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - name: Capture C25 with frozen identity and full-row gates
+        run: python3 tools/p4b_public_capture_v4.py C25 --out-dir out
+      - name: Upload validated C25 package
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: p4b-fsc-recovery-C25-v4
+          path: out/packages/
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+      - name: Upload failure evidence only
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: p4b-fsc-recovery-C25-v4-failure
+          path: out/failures/
+          if-no-files-found: ignore
+          retention-days: 1
+          compression-level: 0
