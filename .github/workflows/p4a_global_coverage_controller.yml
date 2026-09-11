@@ -1,0 +1,120 @@
+name: P4-A global coverage controller
+on:
+  workflow_run:
+    workflows:
+      - 'TEMP P4-A public runner full matrix v4'
+      - 'P4-A repair failed chunks batch1'
+      - 'P4-A repair ROC91 L chunks'
+      - 'P4-A auto repair full-matrix failures'
+      - 'P4-A auto micro-repair failed chunks'
+      - 'P4-A micro-repair auto-repair failures'
+      - 'P4-A final one-page repair'
+      - 'P4-A generic gap repair'
+    types: [completed]
+  workflow_dispatch:
+permissions:
+  actions: write
+  contents: read
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check active P4-A collection runs and collect artifact metadata
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          gh api "repos/$REPO/actions/runs?per_page=100" > runs.json
+          gh api "repos/$REPO/actions/artifacts?per_page=100" --paginate > artifacts-pages.json
+          python - <<'PY'
+          import json,os,sys
+          runs=json.load(open('runs.json')).get('workflow_runs',[])
+          names={
+            'TEMP P4-A public runner full matrix v4','P4-A repair failed chunks batch1','P4-A repair ROC91 L chunks',
+            'P4-A auto repair full-matrix failures','P4-A auto micro-repair failed chunks','P4-A micro-repair auto-repair failures',
+            'P4-A final one-page repair','P4-A generic gap repair'
+          }
+          current=int(os.environ.get('GITHUB_RUN_ID','0'))
+          active=[(r['id'],r['name'],r['status']) for r in runs if r['name'] in names and r['status'] in ('queued','in_progress','waiting','pending','requested') and r['id']!=current]
+          print('ACTIVE',active)
+          if active:
+              open('ACTIVE_COLLECTIONS','w').write(json.dumps(active))
+          PY
+      - name: Audit coverage and dispatch exact remaining gaps
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          if [ -f ACTIVE_COLLECTIONS ]; then echo 'Collection/repair runs still active; defer gap dispatch.'; exit 0; fi
+          python - <<'PY'
+          import json,os,re,subprocess
+          bounds={
+          81:{'L':0},82:{'L':16},83:{'L':22},84:{'L':27},85:{'L':50,'O':3},86:{'L':82,'O':9},87:{'L':119,'O':19},88:{'L':178,'O':33},89:{'L':224,'O':43},90:{'L':261,'O':71},91:{'L':364,'O':77},92:{'L':307,'O':76},93:{'L':297,'O':101},94:{'L':261,'O':108},95:{'L':213,'O':105},96:{'L':233,'O':117},97:{'L':257,'O':132},98:{'L':246,'O':126},99:{'L':270,'O':142},100:{'L':301,'O':152},101:{'L':274,'O':144},102:{'L':293,'O':159},103:{'L':295,'O':163},104:{'L':307,'O':174},105:{'L':304,'O':177},106:{'L':313,'O':174},107:{'L':327,'O':184},108:{'L':336,'O':190},109:{'L':357,'O':219},110:{'L':409,'O':248},111:{'L':380,'O':233},112:{'L':371,'O':235},113:{'L':424,'O':266},114:{'L':458,'O':286},115:{'L':370,'O':232}}
+          # GitHub --paginate may return either one object or a JSON array of page objects depending gh version.
+          raw=json.load(open('artifacts-pages.json'))
+          arts=[]
+          if isinstance(raw,list):
+              for x in raw: arts.extend(x.get('artifacts',[]))
+          else: arts=raw.get('artifacts',[])
+          cov={(y,k):set() for y,ks in bounds.items() for k in ks}
+          # Existing Drive-verified baselines not represented completely in this public repo.
+          cov[(85,'O')].update(range(0,4))
+          cov[(115,'L')].update(range(0,16))
+          pats=[
+            re.compile(r'^p4a-material-info-ROC(\d+)-([LO])-P(?:0*)(\d+)-(?:0*)(\d+)-v4$'),
+            re.compile(r'^p4a-repair-ROC(\d+)-([LO])-P(\d+)-(\d+)-v4$'),
+            re.compile(r'^p4a-auto-repair-ROC(\d+)-([LO])-P(\d+)-(\d+)$'),
+            re.compile(r'^p4a-microrepair-ROC(\d+)-([LO])-P(\d+)-(\d+)$'),
+            re.compile(r'^p4a-auto-microrepair-ROC(\d+)-([LO])-P(\d+)-(\d+)$'),
+            re.compile(r'^p4a-final-ROC(\d+)-([LO])-P(\d+)$'),
+            re.compile(r'^p4a-gap-ROC(\d+)-([LO])-P(\d+)-(\d+)$'),
+            re.compile(r'^p4a-material-info-ROC115-L-p0014-p0015-public-runner-v4$')]
+          accepted=[]
+          for a in arts:
+              if a.get('expired'): continue
+              n=a.get('name',''); m=None
+              if n=='p4a-material-info-ROC115-L-p0014-p0015-public-runner-v4':
+                  y,k,s,e=115,'L',14,15
+              else:
+                  for p in pats[:-1]:
+                      m=p.match(n)
+                      if m: break
+                  if not m: continue
+                  g=m.groups(); y=int(g[0]); k=g[1]; s=int(g[2]); e=int(g[3]) if len(g)>3 and g[3] is not None else s
+              if (y,k) not in cov: continue
+              maxp=bounds[y][k]; s=max(0,s); e=min(maxp,e)
+              if s<=e:
+                  cov[(y,k)].update(range(s,e+1)); accepted.append({'artifact_id':a['id'],'name':n,'digest':a.get('digest'),'roc':y,'kind':k,'start':s,'end':e})
+          missing=[]; summaries=[]; total_req=0; total_cov=0
+          for y,ks in bounds.items():
+              for k,maxp in ks.items():
+                  req=set(range(maxp+1)); got=cov[(y,k)] & req; miss=sorted(req-got)
+                  total_req+=len(req); total_cov+=len(got)
+                  summaries.append({'roc':y,'kind':k,'required_pages':len(req),'covered_pages':len(got),'missing_pages':len(miss),'max_page':maxp})
+                  for p in miss: missing.append((y,k,p))
+          audit={'schema':'p4a_global_artifact_coverage_audit_v1','required_pages':total_req,'covered_pages':total_cov,'missing_page_count':len(missing),'historical_base_complete_artifact_layer':len(missing)==0,'summaries':summaries,'accepted_artifacts':accepted,'missing_pages':[{'roc':y,'kind':k,'page':p} for y,k,p in missing]}
+          open('P4A_GLOBAL_COVERAGE_AUDIT.json','w').write(json.dumps(audit,ensure_ascii=False,indent=2,sort_keys=True)+'\n')
+          print('coverage',total_cov,'/',total_req,'missing',len(missing))
+          if not missing: sys_exit=0
+          else:
+              # contiguous gaps, max 3 pages per work item for final convergence.
+              items=[]; i=0
+              while i<len(missing):
+                  y,k,p=missing[i]; end=p; i+=1
+                  while i<len(missing) and missing[i][0]==y and missing[i][1]==k and missing[i][2]==end+1 and end-p<2:
+                      end=missing[i][2]; i+=1
+                  items.append({'roc':y,'kind':k,'start':p,'end':end})
+              print('gap work items',len(items))
+              for b in range(0,len(items),200):
+                  matrix=json.dumps({'include':items[b:b+200]},separators=(',',':'))
+                  subprocess.run(['gh','workflow','run','p4a_generic_gap_repair.yml','-R',os.environ['REPO'],'-f','matrix_json='+matrix],check=True)
+              open('GAPS_DISPATCHED','w').write(str(len(items)))
+          PY
+      - name: Upload audit snapshot
+        uses: actions/upload-artifact@v4
+        with:
+          name: p4a-global-coverage-audit-${{ github.run_id }}
+          path: P4A_GLOBAL_COVERAGE_AUDIT.json
+          if-no-files-found: warn
+          retention-days: 2
