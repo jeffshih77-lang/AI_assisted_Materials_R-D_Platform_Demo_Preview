@@ -1,0 +1,32 @@
+name: W08 T146 POST qualification v2
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/w08_t146_post_qualification_v2.yml
+
+permissions:
+  contents: read
+
+jobs:
+  qualify_t146_post:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Qualification-only exact POST probe
+        run: python3 w08_public_runner/w08_t146_post_qualification_v2.py
+      - name: Summarize qualification
+        if: always()
+        run: |
+          ls -lh w08_t146_post_qualification_v2 || true
+          [ -f w08_t146_post_qualification_v2/QUALIFICATION.json ] && cat w08_t146_post_qualification_v2/QUALIFICATION.json || true
+      - name: Upload qualification evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: w08-t146-post-qualification-v2
+          path: w08_t146_post_qualification_v2/
+          if-no-files-found: error
+          retention-days: 7
