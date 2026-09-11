@@ -30,3 +30,4 @@ jobs:
           path: w08_t146_post_qualification_v2/
           if-no-files-found: error
           retention-days: 7
+# rerun after syntax-only repair 2026-09-12
