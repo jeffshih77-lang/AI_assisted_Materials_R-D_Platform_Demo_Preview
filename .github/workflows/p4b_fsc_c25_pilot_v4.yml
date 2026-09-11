@@ -1,4 +1,4 @@
-name: P4-B FSC C25 public transport pilot v4
+name: P4-B FSC C25 public transport pilot v4.1
 
 on:
   push:
@@ -6,7 +6,7 @@ on:
       - p4b-runner-probe-20260912
     paths:
       - .github/workflows/p4b_fsc_c25_pilot_v4.yml
-      - tools/p4b_public_capture_v4.py
+      - tools/p4b_c25_capture_v41.py
 
 permissions:
   contents: read
@@ -18,24 +18,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Syntax gate
-        run: python3 -m py_compile tools/p4b_public_capture_v4.py
+        run: python3 -m py_compile tools/p4b_c25_capture_v41.py
       - name: Capture C25 with frozen identity and full-row gates
-        run: python3 tools/p4b_public_capture_v4.py C25 --out-dir out
+        run: python3 tools/p4b_c25_capture_v41.py
       - name: Upload validated C25 package
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: p4b-fsc-recovery-C25-v4
-          path: out/packages/
+          name: p4b-fsc-recovery-C25-v41
+          path: |
+            out/P4B_FSC_RECOVERY_C25_V41.zip
+            out/P4B_FSC_RECOVERY_C25_V41_RECEIPT.json
           if-no-files-found: error
-          retention-days: 1
-          compression-level: 0
-      - name: Upload failure evidence only
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: p4b-fsc-recovery-C25-v4-failure
-          path: out/failures/
-          if-no-files-found: ignore
           retention-days: 1
           compression-level: 0
