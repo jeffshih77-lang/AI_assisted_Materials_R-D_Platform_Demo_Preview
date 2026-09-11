@@ -75,3 +75,4 @@ jobs:
           name: p4a-targeted-final-four-run-${{ github.run_id }}-bundle
           path: P4A-TARGETED-FINAL-FOUR-RUN-${{ github.run_id }}-BUNDLE.zip
           retention-days: 2
+# trigger after workflow registration
