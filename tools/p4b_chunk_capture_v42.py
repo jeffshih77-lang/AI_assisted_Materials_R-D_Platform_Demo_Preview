@@ -1,9 +1,18 @@
 #!/usr/bin/env python3
-import argparse, concurrent.futures as cf, datetime as dt, hashlib, html, json, pathlib, re, time, urllib.parse, urllib.request, zipfile
+import argparse, base64, concurrent.futures as cf, datetime as dt, hashlib, html, json, pathlib, re, time, urllib.parse, urllib.request, zipfile
 UA='Mozilla/5.0 (compatible; P4B-FSC/4.2)'
 LIST='https://www.fsc.gov.tw/ch/home.jsp?id=96&parentpath=0%2C2&mcustomize='
 BASE='https://www.fsc.gov.tw/ch/'
 FROZEN=14638
+C02_ARCHIVE={
+    13657:{
+        'replay':'https://web.archive.org/web/20031018083930id_/http://www.iiroc.org.tw:80/insurance_Market.doc',
+        'sha1b32':'3KBZPQU7INNQYCFP6KPJW5ID425DYVNL',
+        'timestamp':'20031018083930',
+        'qualification_drive_id':'1IMoizLNncAZMdTVtwe4wumlifqC_AEN6',
+        'qualification_artifact_sha256':'de49969d79ec480efe641cc66a045a62b2ee4e9c29bdfdf507266d0612c01dbe'
+    }
+}
 def nowz(): return dt.datetime.now(dt.timezone.utc).isoformat().replace('+00:00','Z')
 def sha(b): return hashlib.sha256(b).hexdigest()
 def clean(x): return html.unescape(re.sub(r'<[^>]+>',' ',x)).strip()
@@ -47,15 +56,21 @@ def rowsha(rows):
     return sha(z.encode())
 def get(r):
     err=None
+    archive=C02_ARCHIVE.get(r['record_no'])
+    target=archive['replay'] if archive else r['url']
     for a in range(8):
         try:
-            req=urllib.request.Request(r['url'],headers={'User-Agent':UA,'Accept':'*/*','Connection':'close'})
+            req=urllib.request.Request(target,headers={'User-Agent':UA,'Accept':'*/*','Connection':'close'})
             with urllib.request.urlopen(req,timeout=120) as x: body=x.read(); hdr=dict(x.headers.items()); final=x.geturl(); st=x.status
             if st==200 and body:
                 ct=(hdr.get('Content-Type') or '').lower()
                 if r['resource_kind']=='DIRECT_DOCUMENT' and len(body)<64: raise RuntimeError('small document')
                 if r['resource_kind']=='HTML_DETAIL' and 'html' not in ct and not body.lstrip().startswith(b'<'): raise RuntimeError('not html')
-                return r,body,hdr,final,a+1
+                if archive:
+                    digest=base64.b32encode(hashlib.sha1(body).digest()).decode().rstrip('=')
+                    if digest!=archive['sha1b32']: raise RuntimeError(f'archive digest mismatch {digest}')
+                    if body[:8].hex()!='d0cf11e0a1b11ae1': raise RuntimeError('archive payload is not OLE document')
+                return r,body,hdr,final,a+1,archive,target
         except Exception as e: err=repr(e); time.sleep(min(20,2**a))
     raise RuntimeError(f"record {r['record_no']} failed {err}")
 def main():
@@ -86,13 +101,15 @@ def main():
         fs=[ex.submit(get,r) for r in rows]
         for f in cf.as_completed(fs): got.append(f.result())
     manifest=[]
-    for r,body,hdr,final,attempts in sorted(got,key=lambda z:z[0]['record_no']):
-        ct=(hdr.get('Content-Type') or '').lower(); ext='.html' if r['resource_kind']=='HTML_DETAIL' else ('.pdf' if body.startswith(b'%PDF') or 'pdf' in ct else '.bin')
+    for r,body,hdr,final,attempts,archive,target in sorted(got,key=lambda z:z[0]['record_no']):
+        ct=(hdr.get('Content-Type') or '').lower(); ext='.html' if r['resource_kind']=='HTML_DETAIL' else ('.pdf' if body.startswith(b'%PDF') or 'pdf' in ct else ('.doc' if body[:8].hex()=='d0cf11e0a1b11ae1' else '.bin'))
         rid=r['dataserno'] or f"record{r['record_no']:05d}"; stem=f"{r['source_page']:04d}_{r['record_no']:05d}_{r['published_date']}_{rid}"
         rp=root/'detail'/(stem+'.response'+ext); mp=root/'meta'/(stem+'.capture.json'); rp.write_bytes(body)
-        meta={'schema':'p4b_exact_http_capture_v1','lane_code':'P4-B','dataset':'FINANCIAL_NEWS_EVENTS','source_family':'FSC_OFFICIAL_NEWS_ARCHIVE_V1','source_contract_version':'1.2.0','recovery_collector_version':'4.2.0','method':'GET','request_url':r['url'],'final_url':final,'retrieved_at':nowz(),'http_status':200,'response_headers':hdr,'payload_bytes':len(body),'payload_sha256':sha(body),'source_page':r['source_page'],'record_no':r['record_no'],'dataserno':r['dataserno'],'record_identity':r['record_identity'],'resource_kind':r['resource_kind'],'published_date':r['published_date'],'published_date_source':'FSC frozen archive list row reconstructed after hash gate','available_at':'unknown','unit':r['unit'],'title':r['title'],'raw_semantics':'exact FSC linked resource HTTP response bytes','classification':'FORMAL_RAW_CANDIDATE_PENDING_DRIVE_READBACK','attempts_used':attempts}
+        meta={'schema':'p4b_exact_http_capture_v1','lane_code':'P4-B','dataset':'FINANCIAL_NEWS_EVENTS','source_family':'FSC_OFFICIAL_NEWS_ARCHIVE_V1','source_contract_version':'1.2.0','recovery_collector_version':'4.2.1','method':'GET','request_url':r['url'],'transport_url':target,'final_url':final,'retrieved_at':nowz(),'http_status':200,'response_headers':hdr,'payload_bytes':len(body),'payload_sha256':sha(body),'source_page':r['source_page'],'record_no':r['record_no'],'dataserno':r['dataserno'],'record_identity':r['record_identity'],'resource_kind':r['resource_kind'],'published_date':r['published_date'],'published_date_source':'FSC frozen archive list row reconstructed after hash gate','available_at':'unknown','unit':r['unit'],'title':r['title'],'raw_semantics':'exact FSC linked resource HTTP response bytes','classification':'FORMAL_RAW_CANDIDATE_PENDING_DRIVE_READBACK','attempts_used':attempts}
+        if archive:
+            meta.update({'transport_source':'INTERNET_ARCHIVE_WAYBACK_RAW_REPLAY','archive_provider':'Internet Archive Wayback Machine','archive_timestamp':archive['timestamp'],'archive_payload_sha1_base32':archive['sha1b32'],'archive_exact_payload_digest_match':True,'qualification_drive_id':archive['qualification_drive_id'],'qualification_artifact_sha256':archive['qualification_artifact_sha256'],'raw_semantics':'exact archived payload bytes of the original officially linked document, Wayback id_ replay verified against CDX payload digest'})
         mp.write_text(json.dumps(meta,ensure_ascii=False,indent=2,sort_keys=True)+'\n')
-        manifest.append({'record_no':r['record_no'],'source_page':r['source_page'],'dataserno':r['dataserno'],'record_identity':r['record_identity'],'resource_kind':r['resource_kind'],'published_date':r['published_date'],'raw_path':str(rp.relative_to(root)),'raw_bytes':len(body),'raw_sha256':sha(body),'metadata_path':str(mp.relative_to(root))})
+        manifest.append({'record_no':r['record_no'],'source_page':r['source_page'],'dataserno':r['dataserno'],'record_identity':r['record_identity'],'resource_kind':r['resource_kind'],'published_date':r['published_date'],'raw_path':str(rp.relative_to(root)),'raw_bytes':len(body),'raw_sha256':sha(body),'metadata_path':str(mp.relative_to(root)),'transport_source':'INTERNET_ARCHIVE_WAYBACK_RAW_REPLAY' if archive else 'ORIGINAL_LINK'})
     m={'schema':'p4b_fsc_recovery_chunk_manifest_v42','chunk':chunk,'expected_record_count':len(expected),'captured_record_count':len(manifest),'failure_count':0,'identity_sha256':ids,'fullrow_sha256':full,'raw_bytes':sum(x['raw_bytes'] for x in manifest),'records':manifest,'status':'CAPTURED_VALIDATED_PENDING_DRIVE_READBACK','generated_at':nowz()}
     (root/f'P4B_FSC_RECOVERY_{chunk}_MANIFEST.json').write_text(json.dumps(m,ensure_ascii=False,indent=2,sort_keys=True)+'\n')
     pkg=pathlib.Path(f'out/P4B_FSC_RECOVERY_{chunk}_V42.zip')
