@@ -1,0 +1,33 @@
+{
+  "schema": "raw_w08_completion_takeover_claim_v1",
+  "work_id": "RAW-W08",
+  "dataset_id": "CORPORATE_ACTIONS",
+  "work_unit_id": "W08-RAW-MOPS-DIVIDEND-T05ST09",
+  "source_family": "MOPS_CA_DIVIDEND_POLICY_T05ST09_V1",
+  "prior_owner": "LANE_B",
+  "prior_handoff_drive_id": "1_IpjuTUcJm57nmwNnHHHTjMZP2qkXCJD",
+  "prior_handoff_generated_at": "2026-09-11T17:47:15+08:00",
+  "prior_state": "IN_PROGRESS_PRE_EXECUTION_COLLISION_CHECK",
+  "prior_formal_raw_state": "NOT_YET_CLAIMED_COMPLETE",
+  "collision_check": {
+    "drive_new_formal_t05st09_found": false,
+    "github_formal_t05st09_run_found": false,
+    "newer_lane_b_handoff_found": false
+  },
+  "takeover_basis": "User explicitly instructed completion of all RAW-W08 work; prior Lane B remained pre-execution with no Formal RAW output, and request contract has now been independently frozen and qualification-tested.",
+  "execution_contract": {
+    "endpoint": "/mops/web/ajax_t05st09_2",
+    "method": "POST",
+    "content_type": "application/x-www-form-urlencoded",
+    "session_model": "GET /mops/web/t05st09_2 then POST using same CookieJar + Referer + Origin",
+    "coverage": "per-company ROC85..115, qryType=1 and qryType=2",
+    "company_universe_file": "w08_public_runner/w08_company_code_universe_v1.json"
+  },
+  "rules": [
+    "Do not rerun POST20050505 completed WU.",
+    "Preserve exact POST body and HTTP response bytes.",
+    "No-data/invalid-code responses are preserved as anomalies, not dropped.",
+    "No shared central control files are modified by this takeover."
+  ],
+  "state": "TAKEOVER_CLAIMED_FOR_W08_FINAL_COMPLETION"
+}
