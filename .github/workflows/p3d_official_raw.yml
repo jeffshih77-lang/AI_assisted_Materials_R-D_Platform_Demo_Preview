@@ -1,0 +1,116 @@
+name: P3D Official RAW
+
+on:
+  push:
+    branches: [p3d-raw-20260911]
+    paths: ['.github/workflows/p3d_official_raw.yml']
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - name: Collect official immutable payloads
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p p3d/raw/ecb p3d/raw/treasury p3d/raw/cboe p3d/raw/eia p3d/headers p3d/meta
+          printf 'dataset\turl\trequest_utc\thttp\tbytes\tsha256\n' > p3d/meta/download_log.tsv
+          get() {
+            id="$1"; url="$2"; out="$3"; hdr="$4"
+            stamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+            code=$(curl --http1.1 --compressed -L --fail --retry 2 --retry-all-errors --retry-delay 2 --connect-timeout 10 --max-time 45 -A 'Mozilla/5.0 P3D-RAW-Collector/2.0' -D "$hdr" -o "$out" -w '%{http_code}' "$url")
+            test "$code" = 200; test -s "$out"
+            if head -c 512 "$out" | grep -Eqi '<html|<!doctype'; then echo "HTML body for $id" >&2; exit 20; fi
+            bytes=$(wc -c < "$out" | tr -d ' '); sha=$(sha256sum "$out"|awk '{print $1}')
+            printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$id" "$url" "$stamp" "$code" "$bytes" "$sha" >> p3d/meta/download_log.tsv
+          }
+          get ECB_USD 'https://data-api.ecb.europa.eu/service/data/EXR/D.USD.EUR.SP00.A?startPeriod=1999-01-01&format=csvdata' p3d/raw/ecb/ECB_USD_EUR.csv p3d/headers/ECB_USD.headers.txt
+          get ECB_JPY 'https://data-api.ecb.europa.eu/service/data/EXR/D.JPY.EUR.SP00.A?startPeriod=1999-01-01&format=csvdata' p3d/raw/ecb/ECB_JPY_EUR.csv p3d/headers/ECB_JPY.headers.txt
+          get ECB_TWD 'https://data-api.ecb.europa.eu/service/data/EXR/D.TWD.EUR.SP00.A?startPeriod=1999-01-01&format=csvdata' p3d/raw/ecb/ECB_TWD_EUR.csv p3d/headers/ECB_TWD.headers.txt
+          get CBOE_VIX 'https://cdn.cboe.com/api/global/us_indices/daily_prices/VIX_History.csv' p3d/raw/cboe/VIX_History.csv p3d/headers/CBOE_VIX.headers.txt
+          get EIA_WTI 'https://www.eia.gov/dnav/pet/hist_xls/RWTCD.xls' p3d/raw/eia/RWTCD.xls p3d/headers/EIA_WTI.headers.txt
+          get EIA_BRENT 'https://www.eia.gov/dnav/pet/hist_xls/RBRTEd.xls' p3d/raw/eia/RBRTEd.xls p3d/headers/EIA_BRENT.headers.txt
+          for y in $(seq 1990 2026); do
+            url="https://home.treasury.gov/resource-center/data-chart-center/interest-rates/daily-treasury-rates.csv/${y}/all?type=daily_treasury_yield_curve&field_tdr_date_value=${y}&page&_format=csv"
+            get "TREASURY_${y}" "$url" "p3d/raw/treasury/yield_curve_${y}.csv" "p3d/headers/TREASURY_${y}.headers.txt"
+          done
+      - name: Validate payloads and build coverage
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip -q install xlrd
+          python <<'PY'
+          import csv, json, hashlib, pathlib, datetime, re, xlrd
+          root=pathlib.Path('p3d')
+          coverage=[]; manifest=[]; work=[]
+          log={}
+          with (root/'meta'/'download_log.tsv').open(encoding='utf-8') as f:
+              next(f)
+              for line in f:
+                  parts=line.rstrip('\n').split('\t')
+                  log[parts[0]]={'url':parts[1],'request_utc':parts[2],'http':parts[3],'bytes':int(parts[4]),'sha256':parts[5]}
+          def add_manifest(iid,p,key):
+              b=p.read_bytes(); assert len(b)==log[key]['bytes']; assert hashlib.sha256(b).hexdigest()==log[key]['sha256']
+              manifest.append({'instrument':iid,'source_key':key,'path':str(p),'url':log[key]['url'],'request_utc':log[key]['request_utc'],'http':log[key]['http'],'bytes':len(b),'sha256':hashlib.sha256(b).hexdigest()})
+          for cur in ['USD','JPY','TWD']:
+              p=root/'raw'/'ecb'/f'ECB_{cur}_EUR.csv'; add_manifest(f'ECB_{cur}_EUR',p,f'ECB_{cur}')
+              rows=list(csv.DictReader(p.read_text(encoding='utf-8-sig').splitlines()))
+              assert rows and 'TIME_PERIOD' in rows[0] and 'OBS_VALUE' in rows[0], (cur, rows[0].keys() if rows else None)
+              ds=[datetime.date.fromisoformat(r['TIME_PERIOD']) for r in rows if re.fullmatch(r'\d{4}-\d{2}-\d{2}',r.get('TIME_PERIOD',''))]
+              assert len(ds)>1000, (cur,len(ds)); coverage.append({'instrument':f'ECB_{cur}_EUR','start':min(ds).isoformat(),'end':max(ds).isoformat(),'rows':len(ds),'source':'ECB'})
+          p=root/'raw'/'cboe'/'VIX_History.csv'; add_manifest('VIX',p,'CBOE_VIX')
+          rows=list(csv.reader(p.read_text(encoding='utf-8-sig').splitlines())); assert rows and rows[0][0].strip().upper().startswith('DATE')
+          ds=[]
+          for r in rows[1:]:
+              if r and re.fullmatch(r'\d{2}/\d{2}/\d{4}',r[0].strip()):
+                  m,d,y=map(int,r[0].strip().split('/')); ds.append(datetime.date(y,m,d))
+          assert len(ds)>1000; coverage.append({'instrument':'VIX','start':min(ds).isoformat(),'end':max(ds).isoformat(),'rows':len(ds),'source':'CBOE'})
+          for iid,key,fn in [('WTI','EIA_WTI','RWTCD.xls'),('BRENT','EIA_BRENT','RBRTEd.xls')]:
+              p=root/'raw'/'eia'/fn; add_manifest(iid,p,key); wb=xlrd.open_workbook(str(p)); ds=[]
+              for sh in wb.sheets():
+                  for row in range(sh.nrows):
+                      for col in range(min(sh.ncols,4)):
+                          c=sh.cell(row,col)
+                          if c.ctype==xlrd.XL_CELL_DATE:
+                              try:
+                                  tup=xlrd.xldate_as_tuple(c.value,wb.datemode); ds.append(datetime.date(tup[0],tup[1],tup[2]))
+                              except Exception: pass
+              assert len(ds)>1000,(iid,len(ds)); coverage.append({'instrument':iid,'start':min(ds).isoformat(),'end':max(ds).isoformat(),'rows':len(ds),'source':'EIA'})
+          treasury_dates=[]; treasury_2=[]; treasury_10=[]
+          for y in range(1990,2027):
+              key=f'TREASURY_{y}'; p=root/'raw'/'treasury'/f'yield_curve_{y}.csv'; add_manifest('UST_YIELD_CURVE',p,key)
+              rows=list(csv.DictReader(p.read_text(encoding='utf-8-sig').splitlines())); assert rows,(y,'empty')
+              for r in rows:
+                  dstr=(r.get('Date') or r.get('DATE') or '').strip()
+                  try: d=datetime.datetime.strptime(dstr,'%m/%d/%Y').date()
+                  except Exception: continue
+                  treasury_dates.append(d)
+                  if (r.get('2 Yr') or '').strip(): treasury_2.append(d)
+                  if (r.get('10 Yr') or '').strip(): treasury_10.append(d)
+          assert treasury_2 and treasury_10
+          coverage.append({'instrument':'UST_2Y','start':min(treasury_2).isoformat(),'end':max(treasury_2).isoformat(),'rows':len(treasury_2),'source':'US_TREASURY'})
+          coverage.append({'instrument':'UST_10Y','start':min(treasury_10).isoformat(),'end':max(treasury_10).isoformat(),'rows':len(treasury_10),'source':'US_TREASURY'})
+          for c in coverage:
+              for y in range(int(c['start'][:4]),int(c['end'][:4])+1): work.append({'instrument':c['instrument'],'year':y,'status':'COVERED_BY_IMMUTABLE_SOURCE_RAW'})
+          (root/'meta'/'coverage.json').write_text(json.dumps(coverage,indent=2),encoding='utf-8')
+          (root/'meta'/'manifest.json').write_text(json.dumps(manifest,indent=2),encoding='utf-8')
+          (root/'meta'/'work_units.json').write_text(json.dumps(work,indent=2),encoding='utf-8')
+          (root/'meta'/'validation_summary.json').write_text(json.dumps({'status':'PASS','coverage_items':len(coverage),'raw_files':len(manifest),'work_units':len(work)},indent=2),encoding='utf-8')
+          print(json.dumps({'coverage':coverage,'raw_files':len(manifest),'work_units':len(work)},indent=2))
+          PY
+      - name: Package deterministic evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          tar --sort=name --mtime='UTC 2026-09-11' --owner=0 --group=0 --numeric-owner -czf P3D_OFFICIAL_RAW_20260911.tar.gz p3d
+          sha256sum P3D_OFFICIAL_RAW_20260911.tar.gz > P3D_OFFICIAL_RAW_20260911.tar.gz.sha256
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: P3D_OFFICIAL_RAW_20260911
+          path: |
+            P3D_OFFICIAL_RAW_20260911.tar.gz
+            P3D_OFFICIAL_RAW_20260911.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 30
