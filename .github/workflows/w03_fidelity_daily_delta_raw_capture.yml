@@ -1,0 +1,134 @@
+name: W03 Daily Delta source-byte fidelity capture
+
+on:
+  push:
+    branches:
+      - w03-fidelity-raw-transport-20260912
+    paths:
+      - .github/workflows/w03_fidelity_daily_delta_raw_capture.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  capture:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Capture exact official response bytes
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          python3 - <<'PY'
+          import datetime as dt
+          import hashlib
+          import json
+          import pathlib
+          import time
+          import urllib.request
+
+          ROOT = pathlib.Path('out')
+          UA = 'Mozilla/5.0 (compatible; W03FidelityCollector/1.0)'
+          DATES = ['20260907', '20260908', '20260909', '20260910']
+
+          def roc_date(d):
+              return f'{int(d[:4]) - 1911:03d}/{d[4:6]}/{d[6:8]}'
+
+          captures = []
+          for d in DATES:
+              rd = roc_date(d)
+              captures.extend([
+                  ('TWSE_MARGIN', d, 'MI_MARGN', f'https://www.twse.com.tw/rwd/zh/marginTrading/MI_MARGN?date={d}&selectType=ALL&response=csv'),
+                  ('TWSE_FOREIGN_HOLD', d, 'MI_QFIIS', f'https://www.twse.com.tw/rwd/trading/fund/MI_QFIIS?date={d}&selectType=ALLBUT0999&response=csv'),
+                  ('TWSE_LENDING', d, 'TWT72U_SLBNLB', f'https://www.twse.com.tw/rwd/zh/lending/TWT72U?date={d}&response=csv&selectType=SLBNLB'),
+                  ('TWSE_INSTITUTIONAL', d, 'TWT38U', f'https://www.twse.com.tw/fund/TWT38U?date={d}&response=csv'),
+                  ('TWSE_INSTITUTIONAL', d, 'TWT43U', f'https://www.twse.com.tw/fund/TWT43U?date={d}&response=csv'),
+                  ('TWSE_INSTITUTIONAL', d, 'TWT44U', f'https://www.twse.com.tw/fund/TWT44U?date={d}&response=csv'),
+                  ('TPEX_MARGIN', d, 'MARGIN_BALANCE', f'https://www.tpex.org.tw/web/stock/margin_trading/margin_balance/margin_bal_result.php?l=zh-tw&o=csv&d={rd}&s=0,asc'),
+                  ('TPEX_FOREIGN_HOLD', d, 'QFII_FOREIGN_HOLD', f'https://www.tpex.org.tw/web/stock/3insti/qfii/qfii_result.php?l=zh-tw&o=csv&d={rd}'),
+                  ('TPEX_LENDING', d, 'MARGIN_SBL', f'https://www.tpex.org.tw/web/stock/margin_trading/margin_sbl/margin_sbl_result.php?l=zh-tw&d={rd}&s=0,asc,0&o=csv'),
+                  ('TPEX_INSTITUTIONAL', d, '3ITRADE_HEDGE', f'https://www.tpex.org.tw/web/stock/3insti/daily_trade/3itrade_hedge_result.php?l=zh-tw&o=csv&se=EW&t=D&d={rd}&s=0,asc'),
+              ])
+
+          manifest = {
+              'schema': 'w03_daily_delta_source_byte_capture_manifest_v1',
+              'worker_code': 'W03',
+              'work_id': 'FIDELITY-W03',
+              'historical_169_packages_rerun': False,
+              'capture_count_expected': len(captures),
+              'captures': []
+          }
+
+          for dataset, date, component, url in captures:
+              req_headers = {'User-Agent': UA, 'Accept': '*/*'}
+              entry = {
+                  'dataset_id': dataset,
+                  'date': date,
+                  'component': component,
+                  'method': 'GET',
+                  'request_url': url,
+                  'request_headers': req_headers
+              }
+              last_exc = None
+              for attempt in range(1, 4):
+                  try:
+                      req = urllib.request.Request(url, method='GET', headers=req_headers)
+                      retrieved_at = dt.datetime.now(dt.timezone.utc).isoformat().replace('+00:00','Z')
+                      with urllib.request.urlopen(req, timeout=90) as resp:
+                          body = resp.read()
+                          status = getattr(resp, 'status', None)
+                          final_url = resp.geturl()
+                          headers = dict(resp.headers.items())
+                      ddir = ROOT / dataset / date
+                      ddir.mkdir(parents=True, exist_ok=True)
+                      raw_path = ddir / f'{component}.response.bin'
+                      meta_path = ddir / f'{component}.capture.json'
+                      raw_path.write_bytes(body)
+                      sha = hashlib.sha256(body).hexdigest()
+                      entry.update({
+                          'retrieved_at': retrieved_at,
+                          'attempt': attempt,
+                          'http_status': status,
+                          'final_url': final_url,
+                          'response_headers': headers,
+                          'payload_bytes': len(body),
+                          'payload_sha256': sha,
+                          'raw_path': str(raw_path.relative_to(ROOT)),
+                          'raw_semantics': 'exact HTTP response body bytes',
+                          'capture_ok': bool(status == 200 and len(body) > 0)
+                      })
+                      meta_path.write_text(json.dumps(entry, ensure_ascii=False, indent=2, sort_keys=True) + '\n', encoding='utf-8')
+                      entry['metadata_path'] = str(meta_path.relative_to(ROOT))
+                      print(json.dumps({'dataset':dataset,'date':date,'component':component,'status':status,'bytes':len(body),'sha256':sha,'content_type':headers.get('Content-Type')}, ensure_ascii=False))
+                      break
+                  except Exception as exc:
+                      last_exc = exc
+                      time.sleep(attempt * 2)
+              else:
+                  ddir = ROOT / dataset / date
+                  ddir.mkdir(parents=True, exist_ok=True)
+                  entry.update({'capture_ok': False, 'error_type': type(last_exc).__name__, 'error': str(last_exc)})
+                  meta_path = ddir / f'{component}.capture.json'
+                  meta_path.write_text(json.dumps(entry, ensure_ascii=False, indent=2, sort_keys=True) + '\n', encoding='utf-8')
+                  entry['metadata_path'] = str(meta_path.relative_to(ROOT))
+                  print(json.dumps({'dataset':dataset,'date':date,'component':component,'error':str(last_exc)}, ensure_ascii=False))
+              manifest['captures'].append(entry)
+
+          manifest['capture_count_actual'] = len(manifest['captures'])
+          manifest['capture_ok_count'] = sum(1 for x in manifest['captures'] if x.get('capture_ok'))
+          manifest['capture_failed_count'] = sum(1 for x in manifest['captures'] if not x.get('capture_ok'))
+          (ROOT / 'MANIFEST.json').write_text(json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + '\n', encoding='utf-8')
+          if manifest['capture_ok_count'] == 0:
+              raise SystemExit('all captures failed')
+          PY
+          find out -type f -print | sort
+          sha256sum $(find out -type f | sort)
+
+      - name: Upload W03 fidelity raw capture artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: w03-daily-delta-source-byte-capture
+          path: out/
+          if-no-files-found: error
+          retention-days: 7
