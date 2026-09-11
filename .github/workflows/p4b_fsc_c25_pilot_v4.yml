@@ -6,6 +6,7 @@ on:
       - p4b-runner-probe-20260912
     paths:
       - .github/workflows/p4b_fsc_c25_pilot_v4.yml
+      - tools/p4b_public_capture_v4.py
 
 permissions:
   contents: read
@@ -16,6 +17,8 @@ jobs:
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
+      - name: Syntax gate
+        run: python3 -m py_compile tools/p4b_public_capture_v4.py
       - name: Capture C25 with frozen identity and full-row gates
         run: python3 tools/p4b_public_capture_v4.py C25 --out-dir out
       - name: Upload validated C25 package
