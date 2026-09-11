@@ -132,3 +132,5 @@ jobs:
           path: out/
           if-no-files-found: error
           retention-days: 7
+
+# W03 transport retry marker 2026-09-12
