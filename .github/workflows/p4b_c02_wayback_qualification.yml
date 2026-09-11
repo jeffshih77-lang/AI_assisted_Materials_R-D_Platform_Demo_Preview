@@ -1,0 +1,46 @@
+name: P4-B C02 Wayback raw replay qualification
+
+on:
+  push:
+    branches: [p4b-runner-probe-20260912]
+    paths: [.github/workflows/p4b_c02_wayback_qualification.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  qualify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Fetch and verify raw archived official payload
+        run: |
+          python3 - <<'PY'
+          import base64, hashlib, json, pathlib, urllib.request
+          original='http://www.iiroc.org.tw:80/insurance_Market.doc'
+          timestamp='20031018083930'
+          expected='3KBZPQU7INNQYCFP6KPJW5ID425DYVNL'
+          replay=f'https://web.archive.org/web/{timestamp}id_/{original}'
+          req=urllib.request.Request(replay,headers={'User-Agent':'Mozilla/5.0 P4B archival qualification'})
+          with urllib.request.urlopen(req,timeout=60) as r:
+              body=r.read(); headers=dict(r.headers.items()); status=r.status; final=r.geturl()
+          sha1b32=base64.b32encode(hashlib.sha1(body).digest()).decode().rstrip('=')
+          sha256=hashlib.sha256(body).hexdigest()
+          magic=body[:8].hex()
+          ok=(status==200 and sha1b32==expected and magic=='d0cf11e0a1b11ae1')
+          q={'schema':'p4b_archival_mirror_qualification_v1','record_no':13657,'title':'保險招商文宣','published_date':'2003-10-13','original_official_url':original,'archive_provider':'Internet Archive Wayback Machine','archive_timestamp':timestamp,'raw_replay_url':replay,'http_status':status,'final_url':final,'response_headers':headers,'payload_bytes':len(body),'payload_sha256':sha256,'payload_sha1_base32':sha1b32,'cdx_expected_digest':expected,'ole_doc_magic':magic,'exact_payload_digest_match':sha1b32==expected,'qualification':'PASS_EXACT_ARCHIVED_OFFICIAL_PAYLOAD' if ok else 'FAIL','usage_boundary':'May repair frozen record 13657 only; provenance must retain original official URL and archival replay transport; available_at remains unknown.'}
+          pathlib.Path('out').mkdir(exist_ok=True)
+          pathlib.Path('out/insurance_Market.doc').write_bytes(body)
+          pathlib.Path('out/P4B_C02_RECORD13657_WAYBACK_QUALIFICATION.json').write_text(json.dumps(q,ensure_ascii=False,indent=2,sort_keys=True)+'\n')
+          print(json.dumps(q,ensure_ascii=False,sort_keys=True))
+          if not ok: raise SystemExit(2)
+          PY
+      - name: Upload qualification evidence
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: p4b-c02-record13657-wayback-qualified
+          path: out/
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
