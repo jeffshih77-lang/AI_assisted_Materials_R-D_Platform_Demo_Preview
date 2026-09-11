@@ -1,0 +1,77 @@
+name: P4-A targeted final four pages
+on:
+  push:
+    paths:
+      - '.github/workflows/p4a_targeted_final_four.yml'
+permissions:
+  contents: read
+jobs:
+  repair:
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        page: [12, 13, 216, 217]
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      ROC_YEAR: '90'
+      KIND: L
+      START_PAGE: ${{ matrix.page }}
+      END_PAGE: ${{ matrix.page }}
+      DETAIL_WORKERS: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Capture exact one page
+        run: |
+          cp p4a_runner/p4a_material_info_page_chunk_v4.py /tmp/p4a_collector.py
+          sed -i 's/def get(url, retries=3):/def get(url, retries=20):/' /tmp/p4a_collector.py
+          python /tmp/p4a_collector.py
+      - name: Package work unit
+        run: |
+          python - <<'PY'
+          import pathlib,zipfile
+          root=next(pathlib.Path('out_p4a_chunk').iterdir())
+          out=pathlib.Path(root.name+'.zip')
+          with zipfile.ZipFile(out,'w',zipfile.ZIP_DEFLATED) as z:
+              for p in sorted(root.rglob('*')):
+                  if p.is_file(): z.write(p,p.relative_to(root.parent))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: p4a-targeted-final-ROC90-L-P${{ matrix.page }}
+          path: P4A-MATERIAL-ROC90-L-P*.zip
+          if-no-files-found: error
+          retention-days: 2
+  bundle:
+    needs: repair
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Build verified bundle index
+        run: |
+          python - <<'PY'
+          import hashlib,json,pathlib,zipfile
+          root=pathlib.Path('artifacts'); fs=[]
+          for p in sorted(root.rglob('*')):
+              if p.is_file():
+                  b=p.read_bytes(); fs.append({'path':str(p.relative_to(root)),'bytes':len(b),'sha256':hashlib.sha256(b).hexdigest()})
+          (root/'BUNDLE_INDEX.json').write_text(json.dumps({'schema':'p4a_targeted_final_four_bundle_v1','run_id':${{ github.run_id }},'files':fs},indent=2,sort_keys=True)+'\n')
+          out=pathlib.Path('P4A-TARGETED-FINAL-FOUR-RUN-${{ github.run_id }}-BUNDLE.zip')
+          with zipfile.ZipFile(out,'w',zipfile.ZIP_DEFLATED) as z:
+              for p in sorted(root.rglob('*')):
+                  if p.is_file(): z.write(p,p.relative_to(root.parent))
+          print('bundle_sha256',hashlib.sha256(out.read_bytes()).hexdigest())
+          print('file_count',len(fs))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: p4a-targeted-final-four-run-${{ github.run_id }}-bundle
+          path: P4A-TARGETED-FINAL-FOUR-RUN-${{ github.run_id }}-BUNDLE.zip
+          retention-days: 2
