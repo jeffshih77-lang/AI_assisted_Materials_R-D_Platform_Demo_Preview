@@ -1,0 +1,27 @@
+name: W08 T59 pre-20050505 boundary probe v1
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/w08_t59_boundary_probe_v1.yml
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run T59 boundary qualification probe
+        run: python3 w08_public_runner/w08_t59_boundary_probe_v1.py
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: w08-t59-boundary-probe-v1
+          path: w08_t59_boundary_probe_v1_out/
+          if-no-files-found: error
+          retention-days: 7
