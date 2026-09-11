@@ -1,0 +1,113 @@
+name: P4-A auto micro-repair failed chunks
+on:
+  workflow_run:
+    workflows:
+      - 'P4-A repair failed chunks batch1'
+      - 'P4-A repair ROC91 L chunks'
+    types: [completed]
+permissions:
+  actions: read
+  contents: read
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      count: ${{ steps.plan.outputs.count }}
+    steps:
+      - id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_RUN: ${{ github.event.workflow_run.id }}
+          REPO: ${{ github.repository }}
+        run: |
+          gh api "repos/$REPO/actions/runs/$SOURCE_RUN/jobs?per_page=100" --paginate > jobs.json
+          python - <<'PY'
+          import json, os, re
+          raw=json.load(open('jobs.json')); docs=[]
+          if isinstance(raw,list):
+              for x in raw: docs.extend(x.get('jobs',[]))
+          else: docs=raw.get('jobs',[])
+          pat=re.compile(r'^capture \((\d+), ([LO]), (\d+), (\d+)\)$')
+          inc=[]; seen=set()
+          for j in docs:
+              if j.get('conclusion')!='failure': continue
+              m=pat.match(j.get('name',''))
+              if not m: continue
+              roc=int(m.group(1)); kind=m.group(2); start=int(m.group(3)); end=int(m.group(4))
+              for a in range(start,end+1,2):
+                  b=min(a+1,end); key=(roc,kind,a,b)
+                  if key not in seen:
+                      seen.add(key); inc.append({'roc':roc,'kind':kind,'start':a,'end':b})
+          inc.sort(key=lambda x:(x['roc'],x['kind'],x['start']))
+          with open(os.environ['GITHUB_OUTPUT'],'a') as f:
+              f.write('matrix='+json.dumps({'include':inc},separators=(',',':'))+'\n')
+              f.write('count='+str(len(inc))+'\n')
+          print('microrepair chunks',len(inc))
+          PY
+  repair:
+    needs: plan
+    if: needs.plan.outputs.count != '0'
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix: ${{ fromJson(needs.plan.outputs.matrix) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      ROC_YEAR: ${{ matrix.roc }}
+      KIND: ${{ matrix.kind }}
+      START_PAGE: ${{ matrix.start }}
+      END_PAGE: ${{ matrix.end }}
+      DETAIL_WORKERS: '2'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - name: Capture with extended retries
+        run: |
+          cp p4a_runner/p4a_material_info_page_chunk_v4.py /tmp/p4a_collector.py
+          sed -i 's/def get(url, retries=3):/def get(url, retries=12):/' /tmp/p4a_collector.py
+          python /tmp/p4a_collector.py
+      - name: Package
+        run: |
+          python - <<'PY'
+          import pathlib,zipfile
+          root=next(pathlib.Path('out_p4a_chunk').iterdir()); out=pathlib.Path(root.name+'.zip')
+          with zipfile.ZipFile(out,'w',zipfile.ZIP_DEFLATED) as z:
+              for p in sorted(root.rglob('*')):
+                  if p.is_file(): z.write(p,p.relative_to(root.parent))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: p4a-microrepair-ROC${{ matrix.roc }}-${{ matrix.kind }}-P${{ matrix.start }}-${{ matrix.end }}
+          path: P4A-MATERIAL-ROC${{ matrix.roc }}-${{ matrix.kind }}-P*.zip
+          if-no-files-found: error
+          retention-days: 2
+  bundle:
+    needs: [plan,repair]
+    if: always() && needs.plan.outputs.count != '0'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { path: microrepair_artifacts }
+      - name: Bundle
+        run: |
+          python - <<'PY'
+          import hashlib,json,pathlib,zipfile
+          root=pathlib.Path('microrepair_artifacts'); fs=[]
+          for p in sorted(root.rglob('*')):
+              if p.is_file():
+                  b=p.read_bytes(); fs.append({'path':str(p.relative_to(root)),'bytes':len(b),'sha256':hashlib.sha256(b).hexdigest()})
+          (root/'BUNDLE_INDEX.json').write_text(json.dumps({'schema':'p4a_microrepair_bundle_v1','source_run_id':${{ github.event.workflow_run.id }},'repair_run_id':${{ github.run_id }},'files':fs},indent=2,sort_keys=True)+'\n')
+          out=pathlib.Path('P4A-MICROREPAIR-RUN-${{ github.run_id }}-BUNDLE.zip')
+          with zipfile.ZipFile(out,'w',zipfile.ZIP_DEFLATED) as z:
+              for p in sorted(root.rglob('*')):
+                  if p.is_file(): z.write(p,p.relative_to(root.parent))
+          print(hashlib.sha256(out.read_bytes()).hexdigest())
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: p4a-microrepair-run-${{ github.run_id }}-bundle
+          path: P4A-MICROREPAIR-RUN-${{ github.run_id }}-BUNDLE.zip
+          retention-days: 2
