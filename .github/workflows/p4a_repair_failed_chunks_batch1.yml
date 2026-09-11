@@ -1,0 +1,99 @@
+name: P4-A repair failed chunks batch1
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/p4a_repair_failed_chunks_batch1.yml'
+jobs:
+  capture:
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        include:
+          - { roc: 84, kind: 'L', start: 0, end: 9 }
+          - { roc: 84, kind: 'L', start: 10, end: 19 }
+          - { roc: 84, kind: 'L', start: 20, end: 27 }
+          - { roc: 85, kind: 'L', start: 0, end: 9 }
+          - { roc: 85, kind: 'L', start: 10, end: 19 }
+          - { roc: 85, kind: 'L', start: 20, end: 29 }
+          - { roc: 85, kind: 'L', start: 30, end: 39 }
+          - { roc: 85, kind: 'L', start: 40, end: 49 }
+          - { roc: 85, kind: 'L', start: 50, end: 50 }
+          - { roc: 86, kind: 'L', start: 0, end: 9 }
+          - { roc: 86, kind: 'L', start: 10, end: 19 }
+          - { roc: 86, kind: 'L', start: 20, end: 29 }
+          - { roc: 86, kind: 'L', start: 30, end: 39 }
+          - { roc: 86, kind: 'L', start: 40, end: 49 }
+          - { roc: 86, kind: 'L', start: 50, end: 59 }
+          - { roc: 86, kind: 'L', start: 60, end: 69 }
+          - { roc: 86, kind: 'L', start: 70, end: 79 }
+          - { roc: 86, kind: 'L', start: 80, end: 82 }
+          - { roc: 88, kind: 'O', start: 0, end: 9 }
+          - { roc: 88, kind: 'O', start: 10, end: 19 }
+          - { roc: 88, kind: 'O', start: 20, end: 29 }
+          - { roc: 88, kind: 'O', start: 30, end: 33 }
+          - { roc: 89, kind: 'O', start: 0, end: 9 }
+          - { roc: 89, kind: 'O', start: 10, end: 19 }
+          - { roc: 89, kind: 'O', start: 20, end: 29 }
+          - { roc: 89, kind: 'O', start: 30, end: 39 }
+          - { roc: 89, kind: 'O', start: 40, end: 43 }
+          - { roc: 90, kind: 'L', start: 0, end: 9 }
+          - { roc: 90, kind: 'L', start: 10, end: 19 }
+          - { roc: 90, kind: 'L', start: 20, end: 29 }
+          - { roc: 90, kind: 'L', start: 30, end: 39 }
+          - { roc: 90, kind: 'L', start: 40, end: 49 }
+          - { roc: 90, kind: 'L', start: 50, end: 59 }
+          - { roc: 90, kind: 'L', start: 60, end: 69 }
+          - { roc: 90, kind: 'L', start: 70, end: 79 }
+          - { roc: 90, kind: 'L', start: 80, end: 89 }
+          - { roc: 90, kind: 'L', start: 90, end: 99 }
+          - { roc: 90, kind: 'L', start: 100, end: 109 }
+          - { roc: 90, kind: 'L', start: 110, end: 119 }
+          - { roc: 90, kind: 'L', start: 120, end: 129 }
+          - { roc: 90, kind: 'L', start: 130, end: 139 }
+          - { roc: 90, kind: 'L', start: 140, end: 149 }
+          - { roc: 90, kind: 'L', start: 150, end: 159 }
+          - { roc: 90, kind: 'L', start: 160, end: 169 }
+          - { roc: 90, kind: 'L', start: 170, end: 179 }
+          - { roc: 90, kind: 'L', start: 180, end: 189 }
+          - { roc: 90, kind: 'L', start: 190, end: 199 }
+          - { roc: 90, kind: 'L', start: 200, end: 209 }
+          - { roc: 90, kind: 'L', start: 210, end: 219 }
+          - { roc: 90, kind: 'L', start: 220, end: 229 }
+          - { roc: 90, kind: 'L', start: 230, end: 239 }
+          - { roc: 90, kind: 'L', start: 240, end: 249 }
+          - { roc: 90, kind: 'L', start: 250, end: 259 }
+          - { roc: 90, kind: 'L', start: 260, end: 261 }
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      ROC_YEAR: ${{ matrix.roc }}
+      KIND: ${{ matrix.kind }}
+      START_PAGE: ${{ matrix.start }}
+      END_PAGE: ${{ matrix.end }}
+      DETAIL_WORKERS: '8'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Capture formal RAW
+        run: python p4a_runner/p4a_material_info_page_chunk_v4.py
+      - name: Package artifact
+        run: |
+          python - <<'PY'
+          import pathlib, zipfile
+          root=next(pathlib.Path('out_p4a_chunk').iterdir())
+          out=pathlib.Path(root.name+'.zip')
+          with zipfile.ZipFile(out,'w',zipfile.ZIP_DEFLATED) as z:
+              for p in sorted(root.rglob('*')):
+                  if p.is_file(): z.write(p,p.relative_to(root.parent))
+          print(out)
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: p4a-repair-ROC${{ matrix.roc }}-${{ matrix.kind }}-P${{ matrix.start }}-${{ matrix.end }}-v4
+          path: P4A-MATERIAL-ROC${{ matrix.roc }}-${{ matrix.kind }}-P*.zip
+          if-no-files-found: error
+          retention-days: 2
