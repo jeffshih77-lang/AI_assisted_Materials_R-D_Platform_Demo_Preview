@@ -1,0 +1,38 @@
+name: P4-B FSC recovery batch1 v4.2
+
+on:
+  push:
+    branches:
+      - p4b-runner-probe-20260912
+    paths:
+      - .github/workflows/p4b_fsc_batch1_v42.yml
+
+permissions:
+  contents: read
+
+jobs:
+  capture:
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        chunk: [C01, C02, C06, C07]
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+      - name: Syntax gate
+        run: python3 -m py_compile tools/p4b_chunk_capture_v42.py
+      - name: Capture ${{ matrix.chunk }}
+        run: python3 tools/p4b_chunk_capture_v42.py ${{ matrix.chunk }}
+      - name: Upload package
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: p4b-fsc-recovery-${{ matrix.chunk }}-v42
+          path: |
+            out/P4B_FSC_RECOVERY_${{ matrix.chunk }}_V42.zip
+            out/P4B_FSC_RECOVERY_${{ matrix.chunk }}_V42_RECEIPT.json
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
