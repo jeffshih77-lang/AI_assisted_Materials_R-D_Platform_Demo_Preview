@@ -1,0 +1,48 @@
+name: W08 T146 contract evidence public
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/w08_t146_contract_evidence_public.yml
+
+permissions:
+  contents: read
+
+jobs:
+  capture_contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Capture frontend contract evidence only
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p w08_t146_contract_evidence
+          python3 - <<'PY'
+          import urllib.request, pathlib, hashlib, json, datetime
+          root=pathlib.Path('w08_t146_contract_evidence')
+          urls={
+            'front.response.bin':'https://mopsov.twse.com.tw/mops/web/t146sb10',
+            'mops2.js.response.bin':'https://mopsov.twse.com.tw/mops/web/js/mops2.js',
+            't146sb10.js.response.bin':'https://mopsov.twse.com.tw/mops/web/js/outerScript/t146sb10.js',
+          }
+          rec=[]
+          for fn,url in urls.items():
+            req=urllib.request.Request(url,headers={'User-Agent':'Mozilla/5.0 (compatible; W08T146ContractEvidence/1.0)','Accept':'*/*'})
+            with urllib.request.urlopen(req,timeout=75) as r:
+              b=r.read(); status=getattr(r,'status',None); final=r.geturl(); headers=dict(r.headers.items())
+            if status!=200 or not b: raise RuntimeError((url,status,len(b)))
+            (root/fn).write_bytes(b)
+            rec.append({'file':fn,'url':url,'final_url':final,'http_status':status,'bytes':len(b),'sha256':hashlib.sha256(b).hexdigest(),'content_type':headers.get('Content-Type')})
+          meta={'schema':'w08_t146_frontend_contract_evidence_v2','role':'REQUEST_CONTRACT_EVIDENCE_NOT_CORPORATE_ACTIONS_RAW','retrieved_at':datetime.datetime.now(datetime.timezone.utc).isoformat(),'captures':rec}
+          (root/'META.json').write_text(json.dumps(meta,ensure_ascii=False,indent=2,sort_keys=True)+'\n',encoding='utf-8')
+          print(json.dumps(meta,ensure_ascii=False,indent=2))
+          PY
+      - name: Upload contract evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: w08-t146-frontend-contract-evidence-v2
+          path: w08_t146_contract_evidence/
+          retention-days: 7
