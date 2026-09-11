@@ -1,0 +1,39 @@
+name: P4-B C02 legacy document qualification probe
+
+on:
+  push:
+    branches: [p4b-runner-probe-20260912]
+    paths: [.github/workflows/p4b_c02_legacy_probe.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Probe legacy source and archival indexes
+        run: |
+          python3 - <<'PY'
+          import json, socket, urllib.parse, urllib.request
+          legacy='http://www.iiroc.org.tw/insurance_Market.doc'
+          try:
+              print('DNS',socket.getaddrinfo('www.iiroc.org.tw',80))
+          except Exception as e:
+              print('DNS_FAIL',repr(e))
+          urls=[
+            'https://web.archive.org/cdx/search/cdx?'+urllib.parse.urlencode({'url':legacy,'output':'json','fl':'timestamp,original,statuscode,mimetype,digest,length','filter':'statuscode:200','collapse':'digest'}),
+            'https://web.archive.org/cdx/search/cdx?'+urllib.parse.urlencode({'url':'www.iiroc.org.tw/insurance_Market.doc','output':'json','fl':'timestamp,original,statuscode,mimetype,digest,length','filter':'statuscode:200','collapse':'digest'}),
+            'https://web.archive.org/cdx/search/cdx?'+urllib.parse.urlencode({'url':'iiroc.org.tw/insurance_Market.doc','output':'json','fl':'timestamp,original,statuscode,mimetype,digest,length','filter':'statuscode:200','collapse':'digest'}),
+          ]
+          for u in urls:
+              print('QUERY',u)
+              try:
+                  req=urllib.request.Request(u,headers={'User-Agent':'Mozilla/5.0 P4B qualification probe'})
+                  with urllib.request.urlopen(req,timeout=30) as r:
+                      b=r.read()
+                      print('STATUS',r.status,'BYTES',len(b),'BODY',b[:12000].decode('utf-8','replace'))
+              except Exception as e:
+                  print('ERR',repr(e))
+          PY
