@@ -1,0 +1,46 @@
+name: P4-A generic gap repair
+on:
+  workflow_dispatch:
+    inputs:
+      matrix_json:
+        description: JSON matrix include list
+        required: true
+        type: string
+jobs:
+  capture:
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix: ${{ fromJson(inputs.matrix_json) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      ROC_YEAR: ${{ matrix.roc }}
+      KIND: ${{ matrix.kind }}
+      START_PAGE: ${{ matrix.start }}
+      END_PAGE: ${{ matrix.end }}
+      DETAIL_WORKERS: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - name: Capture exact gap pages
+        run: |
+          cp p4a_runner/p4a_material_info_page_chunk_v4.py /tmp/p4a_collector.py
+          sed -i 's/def get(url, retries=3):/def get(url, retries=20):/' /tmp/p4a_collector.py
+          python /tmp/p4a_collector.py
+      - name: Package
+        run: |
+          python - <<'PY'
+          import pathlib,zipfile
+          root=next(pathlib.Path('out_p4a_chunk').iterdir()); out=pathlib.Path(root.name+'.zip')
+          with zipfile.ZipFile(out,'w',zipfile.ZIP_DEFLATED) as z:
+              for p in sorted(root.rglob('*')):
+                  if p.is_file(): z.write(p,p.relative_to(root.parent))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: p4a-gap-ROC${{ matrix.roc }}-${{ matrix.kind }}-P${{ matrix.start }}-${{ matrix.end }}
+          path: P4A-MATERIAL-ROC${{ matrix.roc }}-${{ matrix.kind }}-P*.zip
+          if-no-files-found: error
+          retention-days: 2
