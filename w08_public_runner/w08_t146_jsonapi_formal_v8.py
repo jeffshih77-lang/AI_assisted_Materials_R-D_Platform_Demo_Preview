@@ -2,7 +2,7 @@ import datetime as dt, gzip, hashlib, io, json, os, pathlib, random, time, urlli
 
 BASE='https://mops.twse.com.tw'
 ENDPOINT=BASE+'/mops/api/t146sb10'
-UA='Mozilla/5.0 (compatible; W08T146Formal/8.0)'
+UA='Mozilla/5.0 (compatible; W08T146Formal/8.1)'
 MARKETS=('sii','otc','rotc','pub')
 SEGMENTS=((85,87),(88,90),(91,93),(94,96),(97,99),(100,102),(103,105),(106,108),(109,111),(112,114),(115,115))
 SEG=int(os.environ.get('SEGMENT','0'))
@@ -92,6 +92,18 @@ def resolve(market,start,end,depth=0):
         return True
     meta['resolution']='RANGE_406_SPLIT_FOR_FALSE_NEGATIVE_SAFETY'
     anomalies.append({'type':'RANGE_406_REQUIRES_SPLIT','market':market,'start':roc(start),'end':roc(end),'response_sha256':meta['response_sha256']})
+    # v7c qualification proved a month-level false-negative can resolve at seven-day scope.
+    # For wide ranges, jump directly to <=7-day slices; any slice still returning 406 is
+    # recursively bisected until API 200 or a day-level source-declared 406.
+    if (end-start).days > 6:
+        cur=start; all_ok=True
+        while cur<=end:
+            sub_end=min(end,cur+dt.timedelta(days=6))
+            time.sleep(0.12)
+            child_ok=resolve(market,cur,sub_end,depth+1)
+            all_ok=child_ok and all_ok
+            cur=sub_end+dt.timedelta(days=1)
+        return all_ok
     delta=(end-start).days; mid=start+dt.timedelta(days=delta//2)
     time.sleep(0.12)
     a=resolve(market,start,mid,depth+1)
@@ -113,8 +125,7 @@ for y in range(YSTART,YEND+1):
             if not resolve(market,s,e): ok=False
             time.sleep(0.18)
 
-# Re-load meta after resolution labels were assigned in memory; package exact saved bytes plus authoritative manifest.
-coverage={'schema':'w08_t146_jsonapi_formal_coverage_v8','work_unit_id':'W08-RAW-MOPS-STRUCTURED-T146','source_revision':'MOPS_T146_JSON_API_V2','authority':'MOPS official','endpoint':ENDPOINT,'segment':SEG,'roc_year_start':YSTART,'roc_year_end':YEND,'markets':list(MARKETS),'monthly_target_count':len(monthly_targets),'monthly_targets':monthly_targets,'capture_count':len(records),'api_200_captures':sum(1 for r in records if r['classification']['api_code']==200),'api_406_captures':sum(1 for r in records if r['classification']['api_code']==406),'row_count_across_200_responses':sum(r['classification']['rows'] for r in records if r['classification']['api_code']==200),'failure_count':len(failures),'anomaly_count':len(anomalies),'retry_event_count':len(retry_events),'status':'FORMAL_RAW_SEGMENT_COMPLETE' if ok and not failures else 'PARTIAL_FAILED','contract':{'scopeType':'2','companyId':'','dateType':'1','marketKind':'sii|otc|rotc|pub','announcementBasis':'0','dateRangeType':'','announcementType':'1','sort':'1','initial_partition':'calendar month','range_406_rule':'recursively bisect inclusive date range until API 200 or day-level source-declared 406'},'qualification_evidence':{'v7_run':34693727643,'v7_artifact':10298142663,'v7b_run':34694056871,'v7b_artifact':10297728630},'generated_at':now()}
+coverage={'schema':'w08_t146_jsonapi_formal_coverage_v8','runner_version':'8.1','work_unit_id':'W08-RAW-MOPS-STRUCTURED-T146','source_revision':'MOPS_T146_JSON_API_V2','authority':'MOPS official','endpoint':ENDPOINT,'segment':SEG,'roc_year_start':YSTART,'roc_year_end':YEND,'markets':list(MARKETS),'monthly_target_count':len(monthly_targets),'monthly_targets':monthly_targets,'capture_count':len(records),'api_200_captures':sum(1 for r in records if r['classification']['api_code']==200),'api_406_captures':sum(1 for r in records if r['classification']['api_code']==406),'row_count_across_200_responses':sum(r['classification']['rows'] for r in records if r['classification']['api_code']==200),'failure_count':len(failures),'anomaly_count':len(anomalies),'retry_event_count':len(retry_events),'status':'FORMAL_RAW_SEGMENT_COMPLETE' if ok and not failures else 'PARTIAL_FAILED','contract':{'scopeType':'2','companyId':'','dateType':'1','marketKind':'sii|otc|rotc|pub','announcementBasis':'0','dateRangeType':'','announcementType':'1','sort':'1','initial_partition':'calendar month','range_406_rule':'range 406 -> <=7-day slices; any 406 slice recursively bisected until API 200 or day-level source-declared 406'},'qualification_evidence':{'v7_run':34693727643,'v7_artifact':10298142663,'v7b_run':34694056871,'v7b_artifact':10297728630,'v7c_run':34694287992,'v7c_artifact':10297448827},'generated_at':now()}
 
 manifest={'schema':'w08_t146_jsonapi_formal_manifest_v8','formal_raw':True,'work_unit_id':'W08-RAW-MOPS-STRUCTURED-T146','source_family':'MOPS_CA_ANNOUNCEMENT_T146_STRUCTURED_V1','source_revision':'MOPS_T146_JSON_API_V2','coverage':coverage,'records':records,'anomalies':anomalies,'retry_events':retry_events,'failures':failures}
 (ROOT/'MANIFEST.json').write_text(json.dumps(manifest,ensure_ascii=False,indent=2,sort_keys=True)+'\n',encoding='utf-8')
