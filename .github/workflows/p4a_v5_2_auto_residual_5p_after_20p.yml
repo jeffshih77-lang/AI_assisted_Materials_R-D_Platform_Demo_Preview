@@ -1,7 +1,7 @@
 name: P4-A V5.2 auto residual 5p after 20p
 on:
   workflow_run:
-    workflows: ['P4-A V5.1 residual 20p workers12 20260912']
+    workflows: ['P4-A V5.1 residual 20p w12 20260912']
     types: [completed]
 permissions:
   actions: read
@@ -35,7 +35,7 @@ jobs:
           v5={(int(r['roc']),r['kind'],x) for r in p['runs'] for x in range(int(r['start']),int(r['end'])+1)}
           formal77={(96,'O',x) for x in range(50,100)} | {(98,'O',x) for x in range(75,100)} | {(98,'O',x) for x in range(125,127)}
           req=v5-formal77; assert len(req)==8348
-          pats={os.environ['PRE_RUN']:re.compile(r'^p4a-v5r-gap-ROC(\d+)-([LO])-P(\d+)-(\d+)$'),os.environ['RUN20']:re.compile(r'^p4a-v5o2-gap-ROC(\d+)-([LO])-P(\d+)-(\d+)$')}
+          pats={os.environ['PRE_RUN']:re.compile(r'^p4a-v5r-gap-ROC(\\d+)-([LO])-P(\\d+)-(\\d+)$'),os.environ['RUN20']:re.compile(r'^p4a-v5o2-gap-ROC(\\d+)-([LO])-P(\\d+)-(\\d+)$')}
           covered=set()
           for R,pat in pats.items():
             arts=[]
