@@ -1,0 +1,155 @@
+name: P2B formal IFRS quarterly batch capture
+
+on:
+  push:
+    branches: [p2b-financial-transport-20260912]
+    paths: [.github/workflows/p2b_xbrl_ifrs_formal_capture.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  capture:
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        year: [2013, 2014, 2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024, 2025, 2026]
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Capture official quarterly XBRL archives
+        shell: bash
+        env:
+          YEAR: ${{ matrix.year }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os, re, io, json, html, time, zipfile, hashlib, pathlib, datetime, urllib.request, urllib.error
+
+          year = int(os.environ['YEAR'])
+          base = pathlib.Path(f'p2b_ifrs_{year}')
+          raw = base/'raw'; meta = base/'meta'
+          raw.mkdir(parents=True, exist_ok=True); meta.mkdir(parents=True, exist_ok=True)
+          page_url = 'https://mopsov.twse.com.tw/mops/web/t203sb02'
+          ua = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/140 Safari/537.36'
+
+          def fetch(url, referer=None, tries=4):
+              last = None
+              for attempt in range(1, tries+1):
+                  headers = {'User-Agent': ua, 'Accept': 'application/zip,application/octet-stream,text/html,*/*'}
+                  if referer: headers['Referer'] = referer
+                  req = urllib.request.Request(url, headers=headers)
+                  try:
+                      with urllib.request.urlopen(req, timeout=180) as r:
+                          b = r.read()
+                          return {'status': r.status, 'body': b, 'headers': dict(r.headers.items()), 'final_url': r.geturl(), 'attempt': attempt}
+                  except Exception as e:
+                      last = repr(e)
+                      if attempt < tries: time.sleep(2.0 * attempt)
+              raise RuntimeError(f'fetch failed after {tries} tries: {url}: {last}')
+
+          pg = fetch(page_url)
+          page_bytes = pg['body']
+          (meta/'t203sb02.response.bin').write_bytes(page_bytes)
+          text = None; enc = None
+          for e in ('utf-8-sig','utf-8','cp950','big5'):
+              try:
+                  text = page_bytes.decode(e); enc = e; break
+              except UnicodeDecodeError:
+                  pass
+          if text is None:
+              text = page_bytes.decode('utf-8','replace'); enc = 'replace'
+          (meta/'t203sb02.decoded.html').write_text(text, encoding='utf-8')
+
+          # Parse the exact download links currently emitted by the official batch-download page.
+          pat = re.compile(r"window\.open\('([^']*fileName=tifrs-(\d{4})Q([1-4])\.zip[^']*)'", re.I)
+          links = {}
+          for href, ys, qs in pat.findall(text):
+              y = int(ys); q = int(qs)
+              links[(y,q)] = html.unescape(href)
+
+          expected_q = [1,2,3,4] if year <= 2025 else [1,2]
+          missing = [q for q in expected_q if (year,q) not in links]
+          if missing:
+              raise RuntimeError(f'official batch page missing expected links for {year}: {missing}')
+
+          page_meta = {
+              'source_page': page_url,
+              'status': pg['status'],
+              'bytes': len(page_bytes),
+              'sha256': hashlib.sha256(page_bytes).hexdigest(),
+              'encoding': enc,
+              'retrieved_at_utc': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+              'all_tifrs_links_count': len(links),
+              'selected_year': year,
+              'selected_quarters': expected_q,
+          }
+          (meta/'source_page.json').write_text(json.dumps(page_meta, ensure_ascii=False, indent=2), encoding='utf-8')
+
+          rows = []
+          for q in expected_q:
+              href = links[(year,q)]
+              url = urllib.request.urljoin('https://mopsov.twse.com.tw', href)
+              got = fetch(url, referer=page_url)
+              b = got['body']
+              name = f'tifrs-{year}Q{q}.zip'
+              p = raw/name
+              p.write_bytes(b)
+              is_zip = b[:4] == b'PK\x03\x04'
+              if got['status'] != 200 or not is_zip:
+                  raise RuntimeError(f'invalid payload {year}Q{q}: status={got["status"]} bytes={len(b)} head={b[:160]!r}')
+              with zipfile.ZipFile(io.BytesIO(b)) as z:
+                  bad = z.testzip()
+                  names = z.namelist()
+              if bad is not None or not names:
+                  raise RuntimeError(f'ZIP integrity failure {year}Q{q}: bad={bad} members={len(names)}')
+              issuer_ids = sorted(set(m.group(1) for n in names for m in [re.search(r'-(\d{4,6})-\d{4}Q[1-4]\.(?:xml|html)$', n, re.I)] if m))
+              row = {
+                  'work_unit_source_period': f'{year}Q{q}',
+                  'source_family': 'MOPSOV_XBRL_IFRS_QUARTERLY_BATCH_ARCHIVE',
+                  'official_page': page_url,
+                  'source_href_exact': href,
+                  'source_url_exact': url,
+                  'final_url': got['final_url'],
+                  'http_status': got['status'],
+                  'retrieved_at_utc': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                  'filename': name,
+                  'bytes': len(b),
+                  'sha256': hashlib.sha256(b).hexdigest(),
+                  'zip_members': len(names),
+                  'zip_test_bad_member': bad,
+                  'issuer_ids_detected': len(issuer_ids),
+                  'issuer_id_sample': issuer_ids[:30],
+                  'first_members': names[:30],
+              }
+              rows.append(row)
+              print(json.dumps(row, ensure_ascii=False))
+
+          year_manifest = {
+              'lane': 'P2-B',
+              'dataset': 'FINANCIAL_STATEMENTS_EPS',
+              'schema_family': 'IFRS_POST_ADOPTION_XBRL',
+              'raw_immutable': True,
+              'year': year,
+              'quarter_count': len(rows),
+              'quarters': rows,
+              'source_page_evidence': page_meta,
+              'notes': [
+                  'Quarter ZIP bytes are preserved exactly as downloaded from MOPSOV.',
+                  'The official batch page is parsed at run time; filenames/paths are not guessed.',
+                  '2026 capture is deliberately capped at Q2 because Q3 is not a completed reporting period as of 2026-09-12.',
+                  'Market-specific logical WUs may reference the same official all-company quarterly archive; no market split is applied to RAW bytes.'
+              ],
+          }
+          (base/'YEAR_MANIFEST.json').write_text(json.dumps(year_manifest, ensure_ascii=False, indent=2), encoding='utf-8')
+          (base/'QUARTER_MANIFEST.ndjson').write_text('\n'.join(json.dumps(r, ensure_ascii=False) for r in rows)+'\n', encoding='utf-8')
+          PY
+      - name: Upload year package
+        uses: actions/upload-artifact@v4
+        with:
+          name: P2B_XBRL_IFRS_RAW_${{ matrix.year }}_20260912
+          path: p2b_ifrs_${{ matrix.year }}/
+          if-no-files-found: error
+          retention-days: 3
+          compression-level: 0
