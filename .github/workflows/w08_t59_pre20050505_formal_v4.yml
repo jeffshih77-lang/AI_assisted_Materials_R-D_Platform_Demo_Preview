@@ -1,0 +1,35 @@
+name: W08 PRE20050505 formal v4
+on:
+  push:
+    branches: [w08-final-free-source-20260912]
+    paths:
+      - '.github/workflows/w08_t59_pre20050505_formal_v4.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  formal:
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix:
+        shard: [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63]
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      SHARD: ${{ matrix.shard }}
+      SHARDS: 64
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: w08-final-free-source-20260912
+      - name: Capture official PRE20050505 T59 units with UI click semantics
+        run: python3 w08_public_runner/w08_t59_pre20050505_formal_v4.py
+      - name: Upload immutable shard evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: w08-t59-pre-v4-${{ matrix.shard }}
+          path: out_t59_pre_v4_*/
+          if-no-files-found: error
+          retention-days: 7
