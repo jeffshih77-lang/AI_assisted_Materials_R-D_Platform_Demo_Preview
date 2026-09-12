@@ -1,0 +1,67 @@
+name: P2-D Q0.15 PR byte transport
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, reopened, synchronize]
+
+permissions:
+  contents: read
+
+jobs:
+  byte-test:
+    if: github.head_ref == 'p2d-q015-byte-test'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Fetch immutable public payloads and validate
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          python3 - <<'PY'
+          import csv, hashlib, io, json, pathlib, urllib.request, zipfile
+          out=pathlib.Path('out'); results=[]
+          def fetch(url):
+              req=urllib.request.Request(url,headers={'User-Agent':'P2D-Q015-ByteTransport/1.0'})
+              with urllib.request.urlopen(req,timeout=60) as r:
+                  return r.read(),getattr(r,'status',200),r.headers.get('Content-Type','')
+
+          u='https://raw.githubusercontent.com/tw-lws/StockBrokerPriceCorrelation/f8158354135f74c87013669ce21e75fadf0ae579/data/0050_broker_trading.csv'
+          try:
+              b,status,ctype=fetch(u)
+              g=hashlib.sha1(f'blob {len(b)}\0'.encode()+b).hexdigest(); h=hashlib.sha256(b).hexdigest()
+              if len(b)!=1182678 or g!='e94d2ecb4fd6b60458cf58c869accf109c8cbeb4': raise ValueError(f'identity mismatch bytes={len(b)} git_sha1={g}')
+              p=out/'tw-lws_0050_broker_trading.csv'; p.write_bytes(b)
+              rows=list(csv.DictReader(io.StringIO(b.decode('utf-8-sig')))); req=['securities_trader','price','buy','sell','securities_trader_id','stock_id','date']
+              if not rows or list(rows[0].keys())!=req: raise ValueError('schema mismatch')
+              ds=sorted({r['date'] for r in rows})
+              results.append({'candidate':'tw-lws immutable exact payload','status':'PASS_BYTES_SCHEMA','bytes':len(b),'git_blob_sha1':g,'sha256':h,'rows':len(rows),'date_min':ds[0],'date_max':ds[-1],'date_count':len(ds),'broker_count':len({r['securities_trader_id'] for r in rows}),'stock_count':len({r['stock_id'] for r in rows}),'price_count':len({r['price'] for r in rows}),'null_required':sum(1 for r in rows for k in req if r[k] in ('',None)),'http_status':status,'content_type':ctype,'source_url':u})
+          except Exception as e: results.append({'candidate':'tw-lws immutable exact payload','status':'FAIL','error':repr(e),'source_url':u})
+
+          u='https://eshop.twse.com.tw/uploadFile/sample/BSR_1.ZIP'
+          try:
+              b,status,ctype=fetch(u); h=hashlib.sha256(b).hexdigest(); (out/'BSR_1.ZIP').write_bytes(b)
+              if not zipfile.is_zipfile(io.BytesIO(b)): raise ValueError('not ZIP')
+              z=zipfile.ZipFile(io.BytesIO(b)); bad=z.testzip(); expected=['證券代號','證券商','成交單價','買進股數','賣出股數']; hits=[]; meta=[]
+              for info in z.infolist():
+                  meta.append({'name':info.filename,'bytes':info.file_size,'compressed_bytes':info.compress_size})
+                  if info.is_dir() or info.file_size>20000000: continue
+                  raw=z.read(info.filename)
+                  for enc in ('utf-8-sig','cp950','big5'):
+                      try: s=raw[:50000].decode(enc)
+                      except Exception: continue
+                      if all(x in s for x in expected): hits.append({'member':info.filename,'encoding':enc}); break
+              results.append({'candidate':'TWSE official BSR_1 sample','status':'PASS_BYTES_ZIP','bytes':len(b),'sha256':h,'zip_test':'PASS' if bad is None else f'FAIL:{bad}','members':z.namelist(),'member_meta':meta,'exact_schema_hits':hits,'http_status':status,'content_type':ctype,'source_url':u})
+          except Exception as e: results.append({'candidate':'TWSE official BSR_1 sample','status':'FAIL','error':repr(e),'source_url':u})
+          (out/'q015_manifest.json').write_text(json.dumps(results,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+          print(json.dumps(results,ensure_ascii=False,indent=2))
+          PY
+          sha256sum out/* || true
+      - name: Upload one-day artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: p2d-q015-pr-byte-test
+          path: out/
+          if-no-files-found: error
+          retention-days: 1
