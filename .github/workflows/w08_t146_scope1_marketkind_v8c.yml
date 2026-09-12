@@ -1,0 +1,71 @@
+name: W08 T146 scope1 marketKind v8c
+on:
+  push:
+    branches: [w08-final-free-source-20260912]
+    paths:
+      - '.github/workflows/w08_t146_scope1_marketkind_v8c.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: w08-final-free-source-20260912
+      - name: Cross-check marketKind under company scope
+        shell: bash
+        run: |
+          mkdir -p out_w08_t146_v8c
+          python3 - <<'PY'
+          import json,urllib.request,pathlib,hashlib,gzip,datetime as dt,time
+          O=pathlib.Path('out_w08_t146_v8c'); U='https://mops.twse.com.tw/mops/api/t146sb10'
+          def sha(b):return hashlib.sha256(b).hexdigest()
+          def one(code,y,m):
+            label=f'{code}_y{y:03d}_{m}'
+            d={'scopeType':'1','companyId':code,'dateType':'1','firstDate':f'{y:03d}0101','lastDate':f'{y:03d}1231','marketKind':m,'announcementBasis':'0','dateRangeType':'','announcementType':'1','sort':'1','encodeURIComponent':1,'step':1,'firstin':1,'off':1}
+            body=json.dumps(d,separators=(',',':')).encode(); (O/f'{label}.request.json').write_bytes(body)
+            q=urllib.request.Request(U,data=body,method='POST',headers={'User-Agent':'Mozilla/5.0','Accept':'application/json,*/*','Content-Type':'application/json','Origin':'https://mops.twse.com.tw','Referer':'https://mops.twse.com.tw/mops/#/web/t146sb10'})
+            last=None
+            for a in range(3):
+              try:
+                with urllib.request.urlopen(q,timeout=90) as r: raw=r.read();st=r.status
+                break
+              except Exception as e:
+                last=repr(e)
+                if a==2: raise
+                time.sleep(2+a)
+            (O/f'{label}.response.bin').write_bytes(raw)
+            with gzip.GzipFile(O/f'{label}.response.bin.gz','wb',mtime=0) as g:g.write(raw)
+            p=json.loads(raw.decode());result=p.get('result'); rows=[]
+            if isinstance(result,list):
+              for x in result:
+                if isinstance(x,dict): rows.extend(x.get('data') or [])
+            fps=sorted(sha(json.dumps(r,ensure_ascii=False,separators=(',',':')).encode()) for r in rows)
+            rec={'code':code,'year':y,'marketKind':m,'http':st,'api_code':p.get('code'),'api_message':p.get('message'),'row_count':len(rows),'response_bytes':len(raw),'response_sha256':sha(raw),'row_set_sha256':sha(('\n'.join(fps)+'\n').encode()),'gzip_roundtrip':gzip.decompress((O/f'{label}.response.bin.gz').read_bytes())==raw}
+            print(json.dumps(rec,ensure_ascii=False),flush=True);return rec
+          rec=[]
+          for code,y in [('3105',105),('6488',105),('8069',105),('1101',105)]:
+            for m in ['sii','otc','pub']:
+              rec.append(one(code,y,m))
+          groups={}
+          for r in rec:groups.setdefault((r['code'],r['year']),[]).append(r)
+          comparisons=[]
+          for k,rs in groups.items():
+            comparisons.append({'code':k[0],'year':k[1],'row_counts':{r['marketKind']:r['row_count'] for r in rs},'row_set_shas':{r['marketKind']:r['row_set_sha256'] for r in rs},'identical_row_sets':len({r['row_set_sha256'] for r in rs})==1,'identical_api_codes':len({r['api_code'] for r in rs})==1})
+          out={'schema':'w08_t146_scope1_marketkind_v8c','endpoint':U,'records':rec,'comparisons':comparisons,'assertions':{'all_http_200':all(r['http']==200 for r in rec),'all_gzip_roundtrip':all(r['gzip_roundtrip'] for r in rec),'marketKind_nonsemantic_for_scope1_controls':all(c['identical_row_sets'] and c['identical_api_codes'] for c in comparisons)},'generated_at':dt.datetime.now(dt.timezone.utc).isoformat()}
+          (O/'PROBE.json').write_text(json.dumps(out,ensure_ascii=False,indent=2,sort_keys=True)+'\n')
+          print(json.dumps(out['assertions'],ensure_ascii=False),flush=True)
+          print(json.dumps(comparisons,ensure_ascii=False,indent=2),flush=True)
+          PY
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: w08-t146-scope1-marketkind-v8c
+          path: out_w08_t146_v8c/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
