@@ -1,0 +1,76 @@
+name: P4-A V5.16 existing candidate scan
+on:
+  push:
+    paths:
+      - '.github/workflows/p4a_v5_16_existing_candidate_scan.yml'
+permissions:
+  actions: read
+  contents: read
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Scan existing artifacts against current authoritative missing whitelist
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          for R in 34685616731 34686421608 34691917746 34699268851; do
+            gh api "repos/$REPO/actions/runs/$R/artifacts?per_page=100" --paginate --slurp > "arts-$R.json"
+          done
+          python - <<'PY'
+          import json,re,pathlib
+          plan=json.load(open('p4a_runner/P4A_FORMAL_MISSING_LIVE.json'))
+          missing={(int(r['roc']),r['kind'],x) for r in plan['exact_missing_ranges'] for x in range(int(r['start']),int(r['end'])+1)}
+          assert len(missing)==int(plan['formal_missing_pages'])
+          specs={
+            34685616731:re.compile(r'^p4a-v5r-gap-ROC([0-9]+)-([LO])-P([0-9]+)-([0-9]+)$'),
+            34686421608:re.compile(r'^p4a-v5o2-gap-ROC([0-9]+)-([LO])-P([0-9]+)-([0-9]+)$'),
+            34691917746:re.compile(r'^p4a-v5r5-gap-ROC([0-9]+)-([LO])-P([0-9]+)-([0-9]+)$'),
+            34699268851:re.compile(r'^p4a-v5r1-gap-ROC([0-9]+)-([LO])-P([0-9]+)$')
+          }
+          report={'schema':'p4a_v5_16_existing_candidate_scan_v1','authoritative_audit_drive_id':plan['authoritative_audit_drive_id'],'authoritative_audit_sha256':plan['authoritative_audit_sha256'],'formal_missing_pages':len(missing),'source_requests_made':False,'runs':{}}
+          all_full_pages=set();all_partial_pages=set()
+          for R,pat in specs.items():
+            arts=[]
+            for page in json.load(open(f'arts-{R}.json')): arts+=page.get('artifacts',[])
+            latest={}
+            for a in arts:
+              if a.get('expired'): continue
+              m=pat.match(a.get('name',''))
+              if not m: continue
+              if R==34699268851:
+                y,k,s=int(m.group(1)),m.group(2),int(m.group(3));e=s
+              else:
+                y,k,s,e=int(m.group(1)),m.group(2),int(m.group(3)),int(m.group(4))
+              key=(y,k,s,e)
+              if key not in latest or int(a['id'])>int(latest[key]['id']): latest[key]=a
+            full=[];partial=[];full_pages=set();partial_pages=set()
+            for (y,k,s,e),a in sorted(latest.items()):
+              q={(y,k,x) for x in range(s,e+1)}; inter=q & missing
+              if not inter: continue
+              rec={'artifact_id':a['id'],'artifact_name':a['name'],'digest':a.get('digest'),'start':s,'end':e,'page_count':len(q),'missing_overlap_pages':len(inter)}
+              if q<=missing:
+                full.append(rec);full_pages|=q
+              else:
+                partial.append(rec);partial_pages|=inter
+            report['runs'][str(R)]={'full_range_artifact_count':len(full),'full_range_unique_missing_pages':len(full_pages),'partial_overlap_artifact_count':len(partial),'partial_overlap_unique_missing_pages':len(partial_pages),'full_range_artifacts':full,'partial_overlap_artifacts':partial}
+            all_full_pages|=full_pages;all_partial_pages|=partial_pages
+          report['all_runs_full_range_unique_missing_pages']=len(all_full_pages)
+          report['all_runs_partial_overlap_unique_missing_pages']=len(all_partial_pages)
+          report['residual_if_full_range_candidates_promoted']=len(missing-all_full_pages)
+          pathlib.Path('out/P4A_V5_16_EXISTING_CANDIDATE_SCAN.json').write_text(json.dumps(report,ensure_ascii=False,indent=2,sort_keys=True)+'\n')
+          print(json.dumps({k:v for k,v in report.items() if k not in ('runs',)},sort_keys=True))
+          for r,v in report['runs'].items(): print(r,{k:v[k] for k in v if not k.endswith('artifacts')})
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: p4a-v5-16-existing-candidate-scan
+          path: out/P4A_V5_16_EXISTING_CANDIDATE_SCAN.json
+          if-no-files-found: error
+          retention-days: 3
