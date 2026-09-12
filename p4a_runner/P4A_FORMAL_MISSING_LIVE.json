@@ -36,6 +36,7 @@
   ],
   "formal_covered_pages": 11425,
   "formal_missing_pages": 1985,
+  "harvest_trigger_nonce": "20260912-final-5p",
   "lane_code": "P4-A",
   "required_pages": 13410,
   "schema": "p4a_formal_missing_live_v1",
