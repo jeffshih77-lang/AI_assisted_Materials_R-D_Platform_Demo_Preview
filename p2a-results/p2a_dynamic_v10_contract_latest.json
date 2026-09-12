@@ -1,0 +1,26 @@
+{
+  "endpoint": "https://mops.twse.com.tw/mops/web/ajax_t21sc03",
+  "run_id": "34691737106",
+  "schema": "p2a_dynamic_v10_contract_probe_summary_v1",
+  "valid_contracts": {
+    "TPEX": {
+      "090-05": [],
+      "090-06": [],
+      "090-08": [],
+      "098-12": [],
+      "099-01": [],
+      "101-12": [],
+      "102-01": []
+    },
+    "TWSE": {
+      "090-05": [],
+      "090-06": [],
+      "090-08": [],
+      "098-12": [],
+      "099-01": [],
+      "101-12": [],
+      "102-01": []
+    }
+  },
+  "valid_observation_count": 0
+}
