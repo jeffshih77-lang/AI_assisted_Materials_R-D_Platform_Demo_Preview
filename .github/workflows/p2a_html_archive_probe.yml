@@ -1,0 +1,54 @@
+name: P2A official MOPS HTML archive probe
+
+on:
+  push:
+    branches: [p2a-transport-20260912]
+    paths: [.github/workflows/p2a_html_archive_probe.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Probe legacy HTML archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          python3 - <<'PY'
+          import urllib.request, urllib.error, hashlib, json, datetime as dt, time
+          MARKETS={'TWSE':'sii','TPEX':'otc'}
+          SAMPLES=[(89,12),(90,5),(90,6),(90,7),(91,8),(102,1),(115,8),(115,9)]
+          def decode(b):
+            for e in ('big5','cp950','utf-8-sig','utf-8'):
+              try:return b.decode(e),e
+              except UnicodeDecodeError: pass
+            return b.decode('utf-8','replace'),'utf-8-replace'
+          rows=[]
+          for market,code in MARKETS.items():
+            for y,m in SAMPLES:
+              for variant in (0,1):
+                u=f'https://mopsov.twse.com.tw/nas/t21/{code}/t21sc03_{y}_{m}_{variant}.html'
+                try:
+                  req=urllib.request.Request(u,headers={'User-Agent':'Mozilla/5.0 (compatible; P2A/1.0)','Referer':'https://mopsov.twse.com.tw/','Accept':'text/html,*/*'})
+                  with urllib.request.urlopen(req,timeout=45) as r:
+                    b=r.read(); st=getattr(r,'status',200)
+                  text,enc=decode(b)
+                  valid=st==200 and len(b)>500 and ('營收' in text or '營業收入' in text) and ('公司代號' in text or '公司名稱' in text or '公司' in text) and ('<table' in text.lower() or '<html' in text.lower())
+                  rows.append({'market':market,'roc_year':y,'month':m,'variant':variant,'url':u,'status':st,'bytes':len(b),'sha256':hashlib.sha256(b).hexdigest() if b else None,'encoding':enc,'valid':valid,'head':text[:160].replace('\n',' ')})
+                except Exception as e:
+                  rows.append({'market':market,'roc_year':y,'month':m,'variant':variant,'url':u,'valid':False,'error':repr(e)})
+                time.sleep(.05)
+          doc={'generated_at':dt.datetime.now(dt.timezone.utc).isoformat(),'rows':rows}
+          open('out/P2A_HTML_ARCHIVE_PROBE.json','w',encoding='utf-8').write(json.dumps(doc,ensure_ascii=False,indent=2)+'\n')
+          print(json.dumps(doc,ensure_ascii=False))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: P2A_HTML_ARCHIVE_PROBE
+          path: out/
+          if-no-files-found: error
+          retention-days: 7
