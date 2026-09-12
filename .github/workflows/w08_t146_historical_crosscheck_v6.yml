@@ -1,0 +1,27 @@
+name: W08 T146 historical crosscheck v6
+on:
+  push:
+    branches: [w08-final-free-source-20260912]
+    paths:
+      - '.github/workflows/w08_t146_historical_crosscheck_v6.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: w08-final-free-source-20260912
+      - name: Run controlled official MOPS T146 historical probes
+        run: python3 w08_public_runner/w08_t146_historical_crosscheck_v6.py
+      - name: Upload exact request-response evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: w08-t146-historical-crosscheck-v6
+          path: out_w08_t146_v6/
+          if-no-files-found: error
+          retention-days: 7
