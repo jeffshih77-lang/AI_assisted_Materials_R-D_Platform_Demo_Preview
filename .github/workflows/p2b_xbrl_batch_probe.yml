@@ -1,0 +1,66 @@
+name: P2B official XBRL batch archive probe
+
+on:
+  push:
+    branches:
+      - p2b-financial-transport-20260912
+    paths:
+      - .github/workflows/p2b_xbrl_batch_probe.yml
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Probe quarterly XBRL batch archives
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import urllib.request, urllib.error, pathlib, hashlib, json, zipfile, io, datetime as dt
+          OUT=pathlib.Path('xbrl_probe'); OUT.mkdir(exist_ok=True)
+          periods=[(2012,4),(2013,1),(2013,2),(2019,2),(2025,4),(2026,1),(2026,2),(2026,3)]
+          patterns=[
+            'https://mops.twse.com.tw/mops/server-java/FileDownLoad?step=9&fileName=tifrs-{y}Q{q}.zip&filePath=/home/html/nas/ifrs/{y}/',
+            'https://mops.twse.com.tw/server-java/FileDownLoad?step=9&fileName=tifrs-{y}Q{q}.zip&filePath=/home/html/nas/ifrs/{y}/',
+            'https://mopsov.twse.com.tw/mops/server-java/FileDownLoad?step=9&fileName=tifrs-{y}Q{q}.zip&filePath=/home/html/nas/ifrs/{y}/',
+          ]
+          ua='Mozilla/5.0 (compatible; P2BXBRLQualification/1.0)'
+          rows=[]
+          for y,q in periods:
+            for pi,pat in enumerate(patterns,1):
+              url=pat.format(y=y,q=q)
+              at=dt.datetime.now(dt.timezone.utc).isoformat().replace('+00:00','Z')
+              try:
+                req=urllib.request.Request(url,headers={'User-Agent':ua,'Accept':'application/zip,application/octet-stream,*/*'})
+                with urllib.request.urlopen(req,timeout=90) as r:
+                  b=r.read(); status=getattr(r,'status',200); final=r.geturl(); headers=dict(r.headers.items()); err=None
+              except urllib.error.HTTPError as e:
+                b=e.read(); status=e.code; final=url; headers=dict(e.headers.items()) if e.headers else {}; err=repr(e)
+              except Exception as e:
+                b=b''; status=None; final=url; headers={}; err=repr(e)
+              iszip=b[:4]==b'PK\x03\x04'; names=[]; zerr=None
+              if iszip:
+                try:
+                  with zipfile.ZipFile(io.BytesIO(b)) as z:
+                    names=z.namelist()
+                    bad=z.testzip()
+                    zerr=('bad_member:'+bad) if bad else None
+                except Exception as e: zerr=repr(e)
+              tag=f'{y}Q{q}_p{pi}'
+              (OUT/(tag+'.bin')).write_bytes(b)
+              rows.append({'year':y,'quarter':q,'pattern':pi,'url':url,'status':status,'bytes':len(b),'sha256':hashlib.sha256(b).hexdigest() if b else None,'is_zip':iszip,'zip_members':len(names),'first_members':names[:20],'zip_error':zerr,'content_type':headers.get('Content-Type'),'content_disposition':headers.get('Content-Disposition'),'final_url':final,'retrieved_at':at,'error':err,'body_file':tag+'.bin'})
+              print(json.dumps({k:rows[-1][k] for k in ['year','quarter','pattern','status','bytes','is_zip','zip_members','zip_error','content_type','content_disposition']},ensure_ascii=False))
+          (OUT/'probe.json').write_text(json.dumps(rows,ensure_ascii=False,indent=2),encoding='utf-8')
+          PY
+      - name: Upload XBRL probe artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: P2B_XBRL_BATCH_PROBE_20260912
+          path: xbrl_probe/
+          if-no-files-found: error
+          retention-days: 3
