@@ -1,0 +1,32 @@
+name: W08 MOPS T146 custom-date probe v4
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/w08_mops_t146_custom_date_probe_v4.yml
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run T146 custom-date probe v4
+        run: python3 w08_public_runner/w08_mops_t146_custom_date_probe_v4.py
+      - name: Summarize
+        if: always()
+        run: |
+          ls -lh w08_t146_custom_date_probe_v4_out || true
+          cat w08_t146_custom_date_probe_v4_out/PROBE.json || true
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: w08-mops-t146-custom-date-probe-v4
+          path: w08_t146_custom_date_probe_v4_out/
+          if-no-files-found: error
+          retention-days: 7
