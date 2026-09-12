@@ -1,0 +1,187 @@
+name: P4-A harvest late delta v1
+on:
+  push:
+    paths:
+      - '.github/workflows/p4a_harvest_late_delta_v1.yml'
+  workflow_dispatch:
+permissions:
+  actions: read
+  contents: read
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      selected_count: ${{ steps.plan.outputs.selected_count }}
+      delta_pages: ${{ steps.plan.outputs.delta_pages }}
+    steps:
+      - id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          OLD_AUDIT_ARTIFACT: '10292182798'
+          NEW_AUDIT_ARTIFACT: '10294930239'
+        run: |
+          set -euo pipefail
+          for tag in old new; do
+            if [ "$tag" = old ]; then aid="$OLD_AUDIT_ARTIFACT"; else aid="$NEW_AUDIT_ARTIFACT"; fi
+            gh api "repos/$REPO/actions/artifacts/$aid" > "$tag.meta.json"
+            curl --fail --silent --show-error --location \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/$REPO/actions/artifacts/$aid/zip" -o "$tag.outer.zip"
+            python - "$tag" <<'PY'
+          import sys,json,hashlib,zipfile,pathlib
+          tag=sys.argv[1]; meta=json.load(open(f'{tag}.meta.json')); b=pathlib.Path(f'{tag}.outer.zip').read_bytes()
+          got=hashlib.sha256(b).hexdigest(); exp=meta['digest'].split(':',1)[1]
+          assert got==exp,(tag,got,exp)
+          with zipfile.ZipFile(f'{tag}.outer.zip') as z:
+              names=[n for n in z.namelist() if n.endswith('.json')]
+              assert len(names)==1,(tag,names)
+              pathlib.Path(f'{tag}.json').write_bytes(z.read(names[0]))
+          PY
+          done
+          python - <<'PY'
+          import json,os
+          old=json.load(open('old.json')); new=json.load(open('new.json'))
+          assert old['required_pages']==new['required_pages']==13410
+          assert old['covered_pages']==3771 and old['missing_page_count']==9639
+          assert new['covered_pages']==4885 and new['missing_page_count']==8525 and new['unexpected_artifact_count']==0
+          cov={(85,'O',p) for p in range(4)} | {(115,'L',p) for p in range(16)}
+          for a in old['accepted_artifacts']:
+              for p in range(int(a['start']),int(a['end'])+1): cov.add((int(a['roc']),a['kind'],p))
+          assert len(cov)==3771,len(cov)
+          old_ids={int(a['id']) for a in old['accepted_artifacts']}
+          candidates=[a for a in new['accepted_artifacts'] if int(a['id']) not in old_ids]
+          candidates.sort(key=lambda a:(-(int(a['end'])-int(a['start'])+1),int(a['id'])))
+          selected=[]; before=len(cov)
+          for a in candidates:
+              pages={(int(a['roc']),a['kind'],p) for p in range(int(a['start']),int(a['end'])+1)}
+              if pages-cov:
+                  selected.append(a); cov |= pages
+          delta=len(cov)-before
+          assert len(cov)==4885,(len(cov),delta)
+          assert delta==1114,delta
+          limit=80_000_000; batches=[]; cur=[]; size=0
+          for a in selected:
+              n=int(a['size'])
+              if cur and size+n>limit:
+                  batches.append(cur); cur=[]; size=0
+              cur.append(int(a['id'])); size+=n
+          if cur: batches.append(cur)
+          inc=[{'batch':f'{i+1:02d}','ids':','.join(map(str,b))} for i,b in enumerate(batches)]
+          matrix=json.dumps({'include':inc},separators=(',',':'))
+          print('late candidates',len(candidates),'selected',len(selected),'delta_pages',delta,'batches',len(batches),[len(b) for b in batches])
+          with open(os.environ['GITHUB_OUTPUT'],'a') as f:
+              f.write('matrix='+matrix+'\n')
+              f.write('selected_count='+str(len(selected))+'\n')
+              f.write('delta_pages='+str(delta)+'\n')
+          open('SELECTED_DELTA_ARTIFACTS.json','w').write(json.dumps({'schema':'p4a_late_delta_plan_v1','old_audit_artifact':10292182798,'new_audit_artifact':10294930239,'old_covered':3771,'new_artifact_layer_covered':4885,'delta_unique_pages':delta,'selected_artifacts':selected,'batches':inc},ensure_ascii=False,indent=2,sort_keys=True)+'\n')
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: p4a-late-delta-plan-${{ github.run_id }}
+          path: SELECTED_DELTA_ARTIFACTS.json
+          if-no-files-found: error
+          retention-days: 2
+
+  harvest:
+    needs: plan
+    if: ${{ needs.plan.outputs.selected_count != '0' }}
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix: ${{ fromJson(needs.plan.outputs.matrix) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      BATCH: ${{ matrix.batch }}
+      IDS_CSV: ${{ matrix.ids }}
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+    steps:
+      - name: Download immutable GitHub artifacts only
+        run: |
+          set -euo pipefail
+          mkdir -p incoming stage
+          IFS=',' read -ra IDS <<< "$IDS_CSV"
+          for id in "${IDS[@]}"; do
+            gh api "repos/$REPO/actions/artifacts/$id" > "incoming/$id.meta.json"
+            curl --fail --silent --show-error --location \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/$REPO/actions/artifacts/$id/zip" -o "incoming/$id.outer.zip"
+          done
+      - name: Validate outer digest and every V4 RAW package
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os,json,re,zipfile,io,hashlib,pathlib
+          inc=pathlib.Path('incoming'); stage=pathlib.Path('stage')
+          pats=[re.compile(x) for x in [
+            r'^p4a-material-info-ROC(\d+)-([LO])-P0*(\d+)-0*(\d+)-v4$',
+            r'^p4a-repair-ROC(\d+)-([LO])-P(\d+)-(\d+)-v4$',
+            r'^p4a-auto-repair-ROC(\d+)-([LO])-P(\d+)-(\d+)$',
+            r'^p4a-microrepair-ROC(\d+)-([LO])-P(\d+)-(\d+)$',
+            r'^p4a-auto-microrepair-ROC(\d+)-([LO])-P(\d+)-(\d+)$',
+            r'^p4a-final-ROC(\d+)-([LO])-P(\d+)$',
+            r'^p4a-targeted-final-ROC(\d+)-([LO])-P(\d+)$',
+            r'^p4a-gap-ROC(\d+)-([LO])-P(\d+)-(\d+)$']]
+          ids=[int(x) for x in os.environ['IDS_CSV'].split(',') if x]; index=[]
+          for aid in ids:
+              meta=json.load(open(inc/f'{aid}.meta.json')); outer=(inc/f'{aid}.outer.zip').read_bytes()
+              got=hashlib.sha256(outer).hexdigest(); exp=meta['digest'].split(':',1)[1]
+              if got!=exp: raise SystemExit(f'outer digest mismatch {aid}: {got} != {exp}')
+              name=meta['name']; m=next((p.match(name) for p in pats if p.match(name)),None)
+              if not m: raise SystemExit(f'unrecognized selected artifact {aid} {name}')
+              g=m.groups(); y=int(g[0]); k=g[1]; s=int(g[2]); e=int(g[3]) if len(g)>3 else s
+              with zipfile.ZipFile(io.BytesIO(outer)) as oz:
+                  children=[n for n in oz.namelist() if n.lower().endswith('.zip') and not n.endswith('/')]
+                  if len(children)!=1: raise SystemExit(f'artifact {aid} expected 1 inner zip, got {children}')
+                  child_name=children[0]; child=oz.read(child_name)
+              csha=hashlib.sha256(child).hexdigest(); csize=len(child)
+              with zipfile.ZipFile(io.BytesIO(child)) as cz:
+                  mans=[n for n in cz.namelist() if n.endswith('/MANIFEST.json') or n=='MANIFEST.json']
+                  if len(mans)!=1: raise SystemExit(f'{aid} manifest count {len(mans)}')
+                  man=json.loads(cz.read(mans[0]).decode('utf-8-sig'))
+              if man.get('schema')!='p4a_material_info_page_chunk_v4': raise SystemExit(f'{aid} schema {man.get("schema")}')
+              cov=man.get('coverage',{}); ass=man.get('assertions',{}); caps=man.get('captures',[]); anos=man.get('anomalies',[])
+              if (int(cov.get('roc_year',-1)),cov.get('kind'),int(cov.get('start_page',-1)),int(cov.get('end_page',-1)))!=(y,k,s,e): raise SystemExit(f'{aid} coverage mismatch')
+              page_count=e-s+1; listcaps=[x for x in caps if x.get('stage')=='LIST']; details=[x for x in caps if x.get('stage')=='DETAIL']
+              if int(ass.get('page_count',-1))!=page_count or int(ass.get('list_capture_count',-1))!=page_count or len(listcaps)!=page_count: raise SystemExit(f'{aid} list/page assertion mismatch')
+              if int(ass.get('detail_capture_count',-1))!=len(details): raise SystemExit(f'{aid} detail count mismatch')
+              if ass.get('all_http_200') is not True or ass.get('all_payload_nonempty') is not True: raise SystemExit(f'{aid} manifest assertions fail')
+              if any(x.get('http_status')!=200 or int(x.get('payload_bytes',0))<=0 for x in caps): raise SystemExit(f'{aid} capture assertion fail')
+              if int(ass.get('nonstandard_detail_count',-1))!=len(anos): raise SystemExit(f'{aid} anomaly count mismatch')
+              if any(a.get('disposition')!='PRESERVE_RAW_DO_NOT_ZERO_FILL' for a in anos): raise SystemExit(f'{aid} anomaly disposition fail')
+              pages=sorted(int(x.get('page')) for x in man.get('page_summaries',[]))
+              if pages!=list(range(s,e+1)): raise SystemExit(f'{aid} page summaries not exact contiguous range')
+              stored=f'artifact_{aid}__{pathlib.Path(child_name).name}'; (stage/stored).write_bytes(child)
+              index.append({'artifact_id':aid,'artifact_name':name,'artifact_outer_digest':meta['digest'],'artifact_outer_size':meta['size_in_bytes'],'child_original_name':child_name,'child_stored_name':stored,'child_sha256':csha,'child_size':csize,'coverage':{'roc_year':y,'kind':k,'start_page':s,'end_page':e,'page_count':page_count},'assertions':{'list_capture_count':len(listcaps),'detail_capture_count':len(details),'nonstandard_detail_count':len(anos),'all_http_200':True,'all_payload_nonempty':True}})
+          out={'schema':'p4a_late_delta_harvest_bundle_index_v1','lane_code':'P4-A','dataset':'MATERIAL_INFO','source_requests_made':False,'batch':os.environ['BATCH'],'artifact_count':len(index),'entries':index}
+          (stage/'BUNDLE_INDEX.json').write_text(json.dumps(out,ensure_ascii=False,indent=2,sort_keys=True)+'\n',encoding='utf-8')
+          print(json.dumps({'batch':os.environ['BATCH'],'artifacts':len(index),'pages':sum(x['coverage']['page_count'] for x in index),'detail_captures':sum(x['assertions']['detail_capture_count'] for x in index)},indent=2))
+          PY
+      - name: Build and self-verify parent bundle
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os,json,zipfile,pathlib,hashlib
+          st=pathlib.Path('stage'); idx=json.loads((st/'BUNDLE_INDEX.json').read_text())
+          out=pathlib.Path(f'P4A-HARVEST-LATE-DELTA-BATCH{os.environ["BATCH"]}-RUN{os.environ["GITHUB_RUN_ID"]}.zip')
+          with zipfile.ZipFile(out,'w',compression=zipfile.ZIP_STORED) as z:
+              z.write(st/'BUNDLE_INDEX.json','BUNDLE_INDEX.json')
+              for e in idx['entries']: z.write(st/e['child_stored_name'],e['child_stored_name'])
+          with zipfile.ZipFile(out) as z:
+              check=json.loads(z.read('BUNDLE_INDEX.json'))
+              for e in check['entries']:
+                  b=z.read(e['child_stored_name']); assert len(b)==e['child_size'] and hashlib.sha256(b).hexdigest()==e['child_sha256']
+          print(out, out.stat().st_size, hashlib.sha256(out.read_bytes()).hexdigest())
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: p4a-harvest-late-delta-batch${{ matrix.batch }}-run${{ github.run_id }}
+          path: P4A-HARVEST-LATE-DELTA-BATCH${{ matrix.batch }}-RUN${{ github.run_id }}.zip
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 2
