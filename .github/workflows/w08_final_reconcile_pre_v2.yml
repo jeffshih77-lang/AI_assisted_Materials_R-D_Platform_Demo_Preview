@@ -1,0 +1,32 @@
+name: W08 PRE final reconcile v2
+on:
+  push:
+    branches: [w08-final-free-source-20260912]
+    paths:
+      - '.github/workflows/w08_final_reconcile_pre_v2.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  finalize_pre:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    env:
+      MODE: pre
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: w08-final-free-source-20260912
+      - name: Reconcile 12810 PRE units and repair exact missing only
+        run: python3 w08_public_runner/w08_final_reconcile_v2.py
+      - name: Upload deterministic PRE final aggregate
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: w08-final-pre-aggregate-v2-safe
+          path: out_w08_final_pre/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
