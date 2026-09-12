@@ -1,0 +1,22 @@
+name: P2D free broker history qualification probe
+on:
+  push:
+    branches:
+      - p2d-free-broker-qual-20260912
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Probe Fubon/MoneyDJ historical broker sources
+        run: python p2d/probe_free_broker_history.py
+      - name: Upload qualification bytes
+        uses: actions/upload-artifact@v4
+        with:
+          name: p2d-free-broker-history-probe
+          path: p2d_probe_output/
+          if-no-files-found: error
+          retention-days: 14
