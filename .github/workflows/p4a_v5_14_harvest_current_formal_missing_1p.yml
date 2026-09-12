@@ -1,0 +1,91 @@
+name: P4-A V5.14 harvest current formal missing 1p
+on:
+  push:
+    paths:
+      - '.github/workflows/p4a_v5_14_harvest_current_formal_missing_1p.yml'
+permissions:
+  actions: read
+  contents: read
+jobs:
+  harvest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      RUN1: '34699268851'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Harvest latest successful 1p artifacts inside formal missing set
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p work/outer work/unpack drive_ready
+          gh api "repos/$REPO/actions/runs/$RUN1/artifacts?per_page=100" --paginate --slurp > work/current.json
+          python - <<'PY'
+          import json,os,re,pathlib,hashlib,zipfile,subprocess
+          plan=json.load(open('p4a_runner/P4A_FORMAL_MISSING_LIVE.json'))
+          assert plan['schema']=='p4a_formal_missing_live_v1'
+          missing={(int(r['roc']),r['kind'],x) for r in plan['exact_missing_ranges'] for x in range(int(r['start']),int(r['end'])+1)}
+          assert len(missing)==int(plan['formal_missing_pages'])
+          arts=[]
+          for o in json.load(open('work/current.json')): arts+=o.get('artifacts',[])
+          pat=re.compile(r'^p4a-v5r1-gap-ROC([0-9]+)-([LO])-P([0-9]+)$')
+          latest={}
+          for a in arts:
+            m=pat.match(a.get('name',''))
+            if not m or a.get('expired'): continue
+            key=(int(m.group(1)),m.group(2),int(m.group(3)))
+            if key not in missing: continue
+            if key not in latest or int(a['id'])>int(latest[key]['id']): latest[key]=a
+          assert latest,'no successful 1p artifacts inside formal missing set'
+          covered=set(); entries=[]
+          for (y,k,p),a in sorted(latest.items()):
+            key=(y,k,p); assert key not in covered
+            outer=pathlib.Path('work/outer')/f"artifact_{a['id']}.zip"
+            subprocess.run(['curl','-fL','--retry','5','--retry-delay','2','-H',f"Authorization: Bearer {os.environ['GH_TOKEN']}",'-H','X-GitHub-Api-Version: 2022-11-28','-o',str(outer),a['archive_download_url']],check=True)
+            ob=outer.read_bytes(); osha=hashlib.sha256(ob).hexdigest(); dg=a.get('digest') or ''
+            if dg.startswith('sha256:'): assert osha==dg.split(':',1)[1]
+            dest=pathlib.Path('work/unpack')/str(a['id']); dest.mkdir(parents=True,exist_ok=True)
+            with zipfile.ZipFile(outer) as z:z.extractall(dest)
+            childs=[q for q in dest.rglob('*.zip') if q.is_file()]; assert len(childs)==1
+            child=childs[0]; cb=child.read_bytes(); csha=hashlib.sha256(cb).hexdigest()
+            with zipfile.ZipFile(child) as z:
+              mans=[n for n in z.namelist() if n=='MANIFEST.json' or n.endswith('/MANIFEST.json')]; assert len(mans)==1
+              man=json.loads(z.read(mans[0]).decode('utf-8-sig'))
+            c=man['coverage']; ass=man['assertions']; caps=man.get('captures',[]); anos=man.get('anomalies',[])
+            assert man['schema']=='p4a_material_info_page_chunk_v4'
+            assert (int(c['roc_year']),c['kind'],int(c['start_page']),int(c['end_page']))==(y,k,p,p)
+            assert int(ass['page_count'])==1 and int(ass['list_capture_count'])==1
+            assert ass['all_http_200'] is True and ass['all_payload_nonempty'] is True
+            assert all(x.get('http_status')==200 and int(x.get('payload_bytes',0))>0 for x in caps)
+            assert int(ass['nonstandard_detail_count'])==len(anos)
+            assert all(x.get('disposition')=='PRESERVE_RAW_DO_NOT_ZERO_FILL' for x in anos)
+            stored=f"artifact_{a['id']}__{child.name}"
+            entries.append({'artifact_id':a['id'],'artifact_name':a['name'],'artifact_outer_sha256':osha,'child_stored_name':stored,'child_original_name':child.name,'child_sha256':csha,'child_size':len(cb),'coverage':{'roc_year':y,'kind':k,'start_page':p,'end_page':p,'page_count':1},'_child_path':str(child)})
+            covered.add(key)
+          residual=missing-covered
+          summary={'schema':'p4a_formal_missing_driven_1p_harvest_v1','source_run_id':int(os.environ['RUN1']),'source_requests_made_by_harvest':False,'input_formal_covered_pages':int(plan['formal_covered_pages']),'input_formal_missing_pages':len(missing),'selected_artifact_count':len(entries),'selected_pages':len(covered),'residual_after_selected_pages':len(residual),'authoritative_audit_drive_id':plan['authoritative_audit_drive_id'],'authoritative_audit_sha256':plan['authoritative_audit_sha256']}
+          pathlib.Path('drive_ready/P4A_FORMAL_MISSING_DRIVEN_1P_HARVEST_SUMMARY.json').write_text(json.dumps(summary,ensure_ascii=False,indent=2,sort_keys=True)+'\n')
+          target=85*1024*1024; groups=[]; cur=[]; sz=0
+          for e in entries:
+            cs=int(e['child_size']); assert cs<target
+            if cur and sz+cs>target: groups.append(cur);cur=[];sz=0
+            cur.append(e);sz+=cs
+          if cur: groups.append(cur)
+          for i,g in enumerate(groups,1):
+            clean=[{k:v for k,v in e.items() if k!='_child_path'} for e in g]
+            idx={'schema':'p4a_formal_missing_driven_1p_drive_bundle_v1','lane_code':'P4-A','dataset':'MATERIAL_INFO','source_run_id':int(os.environ['RUN1']),'part':i,'part_count':len(groups),'artifact_count':len(g),'unique_page_count':len(g),'entries':clean}
+            out=pathlib.Path('drive_ready')/f"P4A-FORMAL-MISSING-1P-PART{i:03d}-RUN{os.environ['RUN1']}.zip"
+            with zipfile.ZipFile(out,'w',compression=zipfile.ZIP_STORED) as z:
+              z.writestr('BUNDLE_INDEX.json',(json.dumps(idx,ensure_ascii=False,indent=2,sort_keys=True)+'\n').encode())
+              for e in g:z.write(e['_child_path'],e['child_stored_name'])
+            assert out.stat().st_size<100*1024*1024
+          print(json.dumps(summary,ensure_ascii=False,sort_keys=True)); print('drive_ready_parts',len(groups))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: p4a-formal-missing-1p-drive-ready
+          path: drive_ready/*
+          if-no-files-found: error
+          retention-days: 3
