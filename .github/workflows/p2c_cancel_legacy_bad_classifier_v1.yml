@@ -1,0 +1,20 @@
+name: P2-C cancel legacy bad classifier v1
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/p2c_cancel_legacy_bad_classifier_v1.yml
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  cancel:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Cancel obsolete legacy run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api -X POST repos/${{ github.repository }}/actions/runs/34687908128/cancel
