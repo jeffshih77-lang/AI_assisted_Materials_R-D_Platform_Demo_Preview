@@ -1,7 +1,7 @@
 name: P4-A V5 post audit 20260912
 on:
   workflow_run:
-    workflows: ["P4-A exact missing V5 20260912", "P4-A exact missing V5 accelerated 20260912"]
+    workflows: ["P4-A exact missing V5 20260912", "P4-A exact missing V5 accelerated 20260912", "P4-A V5 residual 10p highthroughput 20260912"]
     types: [completed]
 permissions:
   actions: read
@@ -22,24 +22,26 @@ jobs:
           python - <<'PY'
           import json, os, re, pathlib
           plan=json.load(open('p4a_runner/P4A_EXACT_MISSING_PLAN_V5_20260912.json'))
-          required=set()
-          for r in plan['runs']:
-            for p in range(int(r['start']),int(r['end'])+1): required.add((int(r['roc']),r['kind'],p))
+          required={(int(r['roc']),r['kind'],p) for r in plan['runs'] for p in range(int(r['start']),int(r['end'])+1)}
           assert len(required)==8425
           objs=json.load(open('artifacts-pages.json')); arts=[]
           for o in objs: arts.extend(o.get('artifacts',[]))
-          pat=re.compile(r'^p4a-v5a?-gap-ROC(\d+)-([LO])-P(\d+)-(\d+)$')
-          covered=set(); accepted=[]; unexpected=[]
+          pats=[
+            re.compile(r'^p4a-v5-gap-ROC(\d+)-([LO])-P(\d+)-(\d+)$'),
+            re.compile(r'^p4a-v5a-gap-ROC(\d+)-([LO])-P(\d+)-(\d+)$'),
+            re.compile(r'^p4a-v5r-gap-ROC(\d+)-([LO])-P(\d+)-(\d+)$')]
+          covered=set(); accepted=[]; unexpected=[]; duplicates=[]
           for a in arts:
             if a.get('expired'): continue
-            m=pat.match(a.get('name',''))
+            m=next((p.match(a.get('name','')) for p in pats if p.match(a.get('name',''))),None)
             if not m: continue
             y=int(m.group(1)); k=m.group(2); s=int(m.group(3)); e=int(m.group(4))
             pages={(y,k,p) for p in range(s,e+1)}
             bad=pages-required
             if bad:
-              unexpected.append({'artifact_id':a['id'],'name':a['name'],'unexpected_pages':sorted(list(bad))})
-              continue
+              unexpected.append({'artifact_id':a['id'],'name':a['name'],'unexpected_pages':sorted(list(bad))}); continue
+            ov=covered & pages
+            if ov: duplicates.append({'artifact_id':a['id'],'name':a['name'],'duplicate_page_count':len(ov)})
             covered |= pages
             accepted.append({'artifact_id':a['id'],'name':a['name'],'size_in_bytes':a['size_in_bytes'],'digest':a.get('digest'),'page_count':e-s+1})
           missing=sorted(required-covered)
@@ -53,17 +55,9 @@ jobs:
                 else: out.append({'roc':y,'kind':k,'start':s,'end':pr,'page_count':pr-s+1}); s=pr=p
               out.append({'roc':y,'kind':k,'start':s,'end':pr,'page_count':pr-s+1})
             return out
-          result={
-            'schema':'p4a_v5_repair_result_audit_v1','lane_code':'P4-A','dataset':'MATERIAL_INFO',
-            'source_run_id':int(os.environ['SOURCE_RUN']),'formal_baseline_covered_pages':4985,'repair_required_pages':8425,
-            'accepted_success_artifact_count':len(accepted),'candidate_repair_covered_pages':len(covered),
-            'candidate_total_covered_pages':4985+len(covered),'residual_missing_pages':len(missing),
-            'unexpected_out_of_plan_artifact_count':len(unexpected),'accepted_artifacts':accepted,
-            'residual_missing_ranges':ranges(missing),'unexpected':unexpected,
-            'note':'artifact-layer result only; formal coverage requires Drive raw-byte readback before credit'
-          }
+          result={'schema':'p4a_v5_repair_result_audit_v2','lane_code':'P4-A','dataset':'MATERIAL_INFO','source_run_id':int(os.environ['SOURCE_RUN']),'formal_baseline_covered_pages':4985,'repair_required_pages':8425,'accepted_success_artifact_count':len(accepted),'candidate_repair_covered_pages':len(covered),'candidate_total_covered_pages':4985+len(covered),'residual_missing_pages':len(missing),'unexpected_out_of_plan_artifact_count':len(unexpected),'duplicate_evidence_artifact_count':len(duplicates),'accepted_artifacts':accepted,'residual_missing_ranges':ranges(missing),'unexpected':unexpected,'duplicates':duplicates,'note':'artifact-layer only; formal coverage requires Drive raw-byte readback before credit'}
           pathlib.Path('P4A_V5_REPAIR_RESULT_AUDIT.json').write_text(json.dumps(result,ensure_ascii=False,indent=2,sort_keys=True)+'\n')
-          print(json.dumps({k:result[k] for k in ['accepted_success_artifact_count','candidate_repair_covered_pages','candidate_total_covered_pages','residual_missing_pages','unexpected_out_of_plan_artifact_count']},indent=2))
+          print(json.dumps({k:result[k] for k in ['accepted_success_artifact_count','candidate_repair_covered_pages','candidate_total_covered_pages','residual_missing_pages','unexpected_out_of_plan_artifact_count','duplicate_evidence_artifact_count']},indent=2))
           PY
       - uses: actions/upload-artifact@v4
         with:
