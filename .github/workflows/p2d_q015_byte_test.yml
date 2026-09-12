@@ -6,6 +6,11 @@ on:
       - p2d-q015-byte-test
     paths:
       - .github/workflows/p2d_q015_byte_test.yml
+  pull_request:
+    branches:
+      - main
+    paths:
+      - .github/workflows/p2d_q015_byte_test.yml
 
 permissions:
   contents: read
@@ -13,6 +18,7 @@ permissions:
 jobs:
   boundary-test:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Fetch and validate two small public candidates
         shell: bash
@@ -29,7 +35,6 @@ jobs:
               with urllib.request.urlopen(req, timeout=60) as r:
                   return r.read(), getattr(r, 'status', 200), r.headers.get('Content-Type','')
 
-          # 1) Immutable public Git payload.
           url = 'https://raw.githubusercontent.com/tw-lws/StockBrokerPriceCorrelation/f8158354135f74c87013669ce21e75fadf0ae579/data/0050_broker_trading.csv'
           try:
               b, status, ctype = fetch(url)
@@ -43,20 +48,10 @@ jobs:
               if not rows or list(rows[0].keys()) != required:
                   raise ValueError('schema mismatch')
               dates = sorted({r['date'] for r in rows})
-              results.append({
-                  'candidate':'tw-lws immutable exact payload','status':'PASS_BYTES_SCHEMA',
-                  'http_status':status,'content_type':ctype,'bytes':len(b),
-                  'git_blob_sha1':git_sha1,'sha256':sha256,'rows':len(rows),
-                  'date_min':dates[0],'date_max':dates[-1],'date_count':len(dates),
-                  'broker_count':len({r['securities_trader_id'] for r in rows}),
-                  'stock_count':len({r['stock_id'] for r in rows}),
-                  'price_count':len({r['price'] for r in rows}),
-                  'null_required':sum(1 for r in rows for k in required if r[k] in ('',None)),
-                  'source_url':url})
+              results.append({'candidate':'tw-lws immutable exact payload','status':'PASS_BYTES_SCHEMA','http_status':status,'content_type':ctype,'bytes':len(b),'git_blob_sha1':git_sha1,'sha256':sha256,'rows':len(rows),'date_min':dates[0],'date_max':dates[-1],'date_count':len(dates),'broker_count':len({r['securities_trader_id'] for r in rows}),'stock_count':len({r['stock_id'] for r in rows}),'price_count':len({r['price'] for r in rows}),'null_required':sum(1 for r in rows for k in required if r[k] in ('',None)),'source_url':url})
           except Exception as e:
               results.append({'candidate':'tw-lws immutable exact payload','status':'FAIL','error':repr(e),'source_url':url})
 
-          # 2) Official TWSE anonymous sample for all-stock, no-warrant BSR.
           url = 'https://eshop.twse.com.tw/uploadFile/sample/BSR_1.ZIP'
           try:
               b, status, ctype = fetch(url)
@@ -80,12 +75,7 @@ jobs:
                       if all(x in s for x in expected):
                           schema_hits.append({'member':info.filename,'encoding':enc})
                           break
-              results.append({
-                  'candidate':'TWSE official BSR_1 sample','status':'PASS_BYTES_ZIP',
-                  'http_status':status,'content_type':ctype,'bytes':len(b),'sha256':sha256,
-                  'zip_test':'PASS' if bad is None else f'FAIL:{bad}',
-                  'members':z.namelist(),'member_meta':meta,'exact_schema_hits':schema_hits,
-                  'source_url':url})
+              results.append({'candidate':'TWSE official BSR_1 sample','status':'PASS_BYTES_ZIP','http_status':status,'content_type':ctype,'bytes':len(b),'sha256':sha256,'zip_test':'PASS' if bad is None else f'FAIL:{bad}','members':z.namelist(),'member_meta':meta,'exact_schema_hits':schema_hits,'source_url':url})
           except Exception as e:
               results.append({'candidate':'TWSE official BSR_1 sample','status':'FAIL','error':repr(e),'source_url':url})
 
