@@ -1,0 +1,88 @@
+name: P2-D Q0.16 forum attachment probe
+
+on:
+  pull_request:
+    branches: [main]
+    types: [reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    if: github.head_ref == 'p2d-q015-byte-test'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Parse one public 2012 forum page and test public attachment only
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          python3 - <<'PY'
+          import hashlib, html, json, pathlib, re, urllib.parse, urllib.request
+          out=pathlib.Path('out')
+          urls=[
+            'https://forum.twbts.com/thread-7341-1-1.html',
+            'https://forum.twbts.com/viewthread.php?tid=7341'
+          ]
+          result={'scope':'single_public_page_attachment_probe','pages':[],'candidate_links':[],'attachment':None}
+          decoded=''; base=''
+          for u in urls:
+            try:
+              req=urllib.request.Request(u,headers={'User-Agent':'Mozilla/5.0 P2D-Q016-PublicArchiveProbe/1.0'})
+              with urllib.request.urlopen(req,timeout=30) as r:
+                b=r.read(); status=getattr(r,'status',200); ct=r.headers.get('Content-Type','')
+              rec={'url':u,'status':status,'bytes':len(b),'sha256':hashlib.sha256(b).hexdigest(),'content_type':ct}
+              result['pages'].append(rec)
+              if status==200 and b:
+                for enc in ('utf-8','cp950','big5'):
+                  try:
+                    s=b.decode(enc)
+                    if '交易明細' in s or 'attachment.php' in s:
+                      decoded=s; base=u; rec['decoded_as']=enc; break
+                  except Exception: pass
+                if decoded:
+                  (out/'forum_7341.html').write_bytes(b)
+                  break
+            except Exception as e:
+              result['pages'].append({'url':u,'error':repr(e)})
+          if decoded:
+            decoded=html.unescape(decoded)
+            links=[]
+            for m in re.finditer(r'href\s*=\s*["\']([^"\']+)["\']',decoded,re.I):
+              href=m.group(1)
+              if 'attachment.php' in href.lower() or '.rar' in href.lower():
+                full=urllib.parse.urljoin(base,href)
+                if full not in links: links.append(full)
+            # also keep local context around the visible attachment name
+            contexts=[]
+            for m in re.finditer('交易明細',decoded):
+              contexts.append(re.sub(r'\s+',' ',decoded[max(0,m.start()-500):m.end()+500])[:1200])
+            result['candidate_links']=links
+            result['contexts']=contexts[:5]
+            # One candidate request maximum. No login, CAPTCHA, cookies, retries, or bypass.
+            if links:
+              u=links[0]
+              try:
+                req=urllib.request.Request(u,headers={'User-Agent':'Mozilla/5.0 P2D-Q016-PublicArchiveProbe/1.0','Referer':base})
+                with urllib.request.urlopen(req,timeout=30) as r:
+                  b=r.read(); status=getattr(r,'status',200); ct=r.headers.get('Content-Type',''); final=r.geturl()
+                a={'url':u,'final_url':final,'status':status,'bytes':len(b),'sha256':hashlib.sha256(b).hexdigest(),'content_type':ct,'magic_hex':b[:16].hex()}
+                is_archive=b.startswith(b'Rar!') or b.startswith(b'PK\x03\x04') or 'rar' in ct.lower() or 'octet-stream' in ct.lower()
+                a['archive_like']=is_archive
+                result['attachment']=a
+                if is_archive and status==200:
+                  (out/'transaction_detail_attachment.bin').write_bytes(b)
+              except Exception as e:
+                result['attachment']={'url':u,'error':repr(e)}
+          (out/'q016_manifest.json').write_text(json.dumps(result,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+          print(json.dumps(result,ensure_ascii=False,indent=2))
+          PY
+      - name: Upload one-day probe artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: p2d-q016-forum-probe
+          path: out/
+          if-no-files-found: error
+          retention-days: 1
