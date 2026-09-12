@@ -1,0 +1,85 @@
+name: P2B annual artifact transport split
+
+on:
+  push:
+    branches: [p2b-financial-transport-20260912]
+    paths: [.github/workflows/p2b_artifact_transport_split.yml]
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  split:
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        year: [2015, 2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024, 2025, 2026]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Download verified annual artifact and split
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          YEAR: ${{ matrix.year }}
+        run: |
+          set -euo pipefail
+          case "$YEAR" in
+            2015) ART_ID=10297630012; EXPECT=2f6b3b92378cdf1c09b60c9705c0302d0e7310447987306a143b628654d7b097; SRC=P2B_XBRL_IFRS_RAW_2015_REPAIR_20260912.zip ;;
+            2017) ART_ID=10296804732; EXPECT=587bfc0fc5cf4386f60fc6b4067817ee2aa5b5260f967bb4700ff92de3ff4170; SRC=P2B_XBRL_IFRS_RAW_2017_20260912.zip ;;
+            2018) ART_ID=10297064638; EXPECT=401d9b6d901ee812cbc5a91a9e886bd578477d67549a231958190b15362f0797; SRC=P2B_XBRL_IFRS_RAW_2018_20260912.zip ;;
+            2019) ART_ID=10297343202; EXPECT=9dbfdedcd820c743b7bfdb57f2b9e75926b2e1c2e3b3ae34e7ea1b05560b5a5b; SRC=P2B_XBRL_IFRS_RAW_2019_20260912.zip ;;
+            2020) ART_ID=10297124919; EXPECT=5ab635c13282ba59c354fc80ef8f672cb5b6bd6ba6b14af556b67f93bd6a9fcb; SRC=P2B_XBRL_IFRS_RAW_2020_20260912.zip ;;
+            2021) ART_ID=10297234763; EXPECT=e4d9ded8d011f07ec500887cd995b71274383337c01ae7ec0d75fd5b19a97c87; SRC=P2B_XBRL_IFRS_RAW_2021_20260912.zip ;;
+            2022) ART_ID=10297356198; EXPECT=925ae6114911549c80f3e79b27f303eec248ee0782a0f953e121efde7104b1ef; SRC=P2B_XBRL_IFRS_RAW_2022_20260912.zip ;;
+            2023) ART_ID=10297199702; EXPECT=6bf2613cf738592807a63b94a98217eb9675084f14b2a1e3fa63dd59e30b0602; SRC=P2B_XBRL_IFRS_RAW_2023_20260912.zip ;;
+            2024) ART_ID=10297910450; EXPECT=58abf1943d948a6304e9b7024dc6cfce501a3000a7696e4872817da372114cd6; SRC=P2B_XBRL_IFRS_RAW_2024_20260912.zip ;;
+            2025) ART_ID=10297850151; EXPECT=cd2e16ee885273f81547d23b0e65a748b9a57cf267fb7bb06d325db5799bd97f; SRC=P2B_XBRL_IFRS_RAW_2025_20260912.zip ;;
+            2026) ART_ID=10297353558; EXPECT=a2b5d23442fc142538c40e3894046de3280223c863e1880222f607d7a1be7d3b; SRC=P2B_XBRL_IFRS_RAW_2026_20260912.zip ;;
+          esac
+          mkdir -p parts
+          curl -fsSL -H "Authorization: Bearer $GH_TOKEN" -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/${ART_ID}/zip" -o annual.zip
+          GOT=$(sha256sum annual.zip | awk '{print $1}')
+          test "$GOT" = "$EXPECT"
+          unzip -t annual.zip >/dev/null
+          split -b 80M -d -a 3 annual.zip parts/part
+          python3 - <<'PY'
+          import os,hashlib,json,pathlib
+          y=int(os.environ['YEAR']); base=pathlib.Path('parts')
+          rows=[]
+          for p in sorted(base.glob('part*')):
+              b=p.read_bytes(); rows.append({'file':p.name,'bytes':len(b),'sha256':hashlib.sha256(b).hexdigest()})
+          m={'lane':'P2-B','year':y,'transport_layer':'GITHUB_ACTIONS_ARTIFACT_WRAPPER_SPLIT','source_artifact_id':int(os.environ.get('ART_ID','0') or 0),'source_artifact_sha256':os.environ.get('EXPECT'),'source_artifact_name':os.environ.get('SRC'),'split_bytes':80*1024*1024,'parts':rows,'reassembly':'extract each transport artifact to its single part file; concatenate part000.. in order; SHA256 must equal source_artifact_sha256'}
+          pathlib.Path('transport_manifest.json').write_text(json.dumps(m,ensure_ascii=False,indent=2),encoding='utf-8')
+          print(json.dumps(m,ensure_ascii=False))
+          PY
+        env:
+          GH_TOKEN: ${{ github.token }}
+          YEAR: ${{ matrix.year }}
+          ART_ID: ${{ env.ART_ID }}
+          EXPECT: ${{ env.EXPECT }}
+          SRC: ${{ env.SRC }}
+      - name: Upload part000
+        uses: actions/upload-artifact@v4
+        with: {name: P2B_TRANSPORT_${{ matrix.year }}_part000, path: parts/part000, if-no-files-found: ignore, retention-days: 3, compression-level: 0}
+      - name: Upload part001
+        uses: actions/upload-artifact@v4
+        with: {name: P2B_TRANSPORT_${{ matrix.year }}_part001, path: parts/part001, if-no-files-found: ignore, retention-days: 3, compression-level: 0}
+      - name: Upload part002
+        uses: actions/upload-artifact@v4
+        with: {name: P2B_TRANSPORT_${{ matrix.year }}_part002, path: parts/part002, if-no-files-found: ignore, retention-days: 3, compression-level: 0}
+      - name: Upload part003
+        uses: actions/upload-artifact@v4
+        with: {name: P2B_TRANSPORT_${{ matrix.year }}_part003, path: parts/part003, if-no-files-found: ignore, retention-days: 3, compression-level: 0}
+      - name: Upload part004
+        uses: actions/upload-artifact@v4
+        with: {name: P2B_TRANSPORT_${{ matrix.year }}_part004, path: parts/part004, if-no-files-found: ignore, retention-days: 3, compression-level: 0}
+      - name: Upload part005
+        uses: actions/upload-artifact@v4
+        with: {name: P2B_TRANSPORT_${{ matrix.year }}_part005, path: parts/part005, if-no-files-found: ignore, retention-days: 3, compression-level: 0}
+      - name: Upload transport manifest
+        uses: actions/upload-artifact@v4
+        with: {name: P2B_TRANSPORT_${{ matrix.year }}_manifest, path: transport_manifest.json, if-no-files-found: error, retention-days: 3, compression-level: 0}
