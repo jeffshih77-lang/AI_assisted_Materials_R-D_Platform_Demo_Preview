@@ -1,0 +1,36 @@
+name: W08 T59 PRE repair failed 0-7
+on:
+  push:
+    branches: [w08-final-free-source-20260912]
+    paths:
+      - '.github/workflows/w08_t59_pre20050505_formal_v3_failed_0_7.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  formal:
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        shard: [0,1,2,3,4,5,6,7]
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      SHARD: ${{ matrix.shard }}
+      SHARDS: '32'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: w08-final-free-source-20260912
+      - name: Capture official PRE20050505 T59 units
+        run: python3 w08_public_runner/w08_t59_pre20050505_formal_v3.py
+      - name: Upload immutable shard evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: w08-t59-pre-v3-fixed-${{ matrix.shard }}
+          path: out_t59_pre_*/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 6
