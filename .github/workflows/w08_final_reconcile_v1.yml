@@ -1,0 +1,36 @@
+name: W08 final reconcile v1
+on:
+  push:
+    branches: [w08-final-free-source-20260912]
+    paths:
+      - '.github/workflows/w08_final_reconcile_v1.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  finalize:
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [t05, pre]
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    env:
+      MODE: ${{ matrix.mode }}
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: w08-final-free-source-20260912
+      - name: Reconcile formal artifacts and repair exact missing units only
+        run: python3 w08_public_runner/w08_final_reconcile_v1.py
+      - name: Upload deterministic final aggregate
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: w08-final-${{ matrix.mode }}-aggregate-v1
+          path: out_w08_final_${{ matrix.mode }}/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
