@@ -1,0 +1,28 @@
+name: W08 PRE missing ledger v1
+on:
+  push:
+    branches: [w08-final-free-source-20260912]
+    paths: ['.github/workflows/w08_pre_missing_ledger_v1.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  ledger:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: w08-final-free-source-20260912
+          fetch-depth: 0
+      - name: Build exact PRE missing ledger without source requests
+        run: python3 w08_public_runner/w08_pre_missing_ledger_v1.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: W08_PRE_MISSING_234_LEDGER_20260912
+          path: out_pre_missing_ledger/
+          if-no-files-found: error
+          retention-days: 7
