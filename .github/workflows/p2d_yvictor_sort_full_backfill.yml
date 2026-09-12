@@ -1,4 +1,4 @@
-name: P2D Yvictor sorted historical raw backfill
+name: P2D Yvictor sorted supplemental history backfill
 on:
   push:
     branches: [p2d-free-broker-qual-20260912]
@@ -11,7 +11,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - name: Fetch and validate byte-exact sorted raw members
+      - name: Fetch and validate byte-exact sorted aggregate members
         shell: python
         run: |
           import csv, hashlib, json, os, urllib.request
@@ -32,7 +32,7 @@ jobs:
           }
           os.makedirs('p2d_sort_output',exist_ok=True)
           manifest=[]
-          required=['日期','代號','證券商','成交單價','買進股數','賣出股數']
+          required=['日期','代號','證券商','買進股數','賣出股數','買進金額','賣出金額','買進均價','賣出均價']
           for fn,(blob_sha,expected_size) in expected.items():
             url=base+fn
             with urllib.request.urlopen(url,timeout=60) as r:
@@ -45,7 +45,7 @@ jobs:
             text=b.decode('utf-8-sig')
             reader=csv.DictReader(text.splitlines())
             if not reader.fieldnames or any(c not in reader.fieldnames for c in required):
-              raise SystemExit(f'{fn} missing required columns: {reader.fieldnames}')
+              raise SystemExit(f'{fn} missing required aggregate columns: {reader.fieldnames}')
             rows=0; dates=set(); stocks=set(); brokers=set(); nulls=0
             for row in reader:
               rows+=1
@@ -57,14 +57,15 @@ jobs:
               'sha256':hashlib.sha256(b).hexdigest(),'rows':rows,
               'date_min':min(dates),'date_max':max(dates),'unique_dates':len(dates),
               'stock_ids':sorted(stocks),'unique_broker_codes':len(brokers),
-              'required_core_null_cells':nulls,'columns':reader.fieldnames
+              'required_core_null_cells':nulls,'columns':reader.fieldnames,
+              'classification':'SUPPLEMENTAL_DERIVED_HISTORY__BROKER_DAY_AGGREGATE__NOT_FORMAL_ROW_LEVEL_RAW'
             })
           open('p2d_sort_output/manifest.json','w',encoding='utf-8').write(json.dumps(manifest,ensure_ascii=False,indent=2))
           print(json.dumps(manifest,ensure_ascii=False,indent=2))
-      - name: Upload validated sorted raw members
+      - name: Upload validated supplemental aggregate members
         uses: actions/upload-artifact@v4
         with:
-          name: p2d-yvictor-sort-full
+          name: p2d-yvictor-sort-supplemental
           path: p2d_sort_output/
           if-no-files-found: error
           retention-days: 14
