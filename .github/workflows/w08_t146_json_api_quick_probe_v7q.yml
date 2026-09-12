@@ -1,0 +1,52 @@
+name: W08 T146 JSON API quick probe v7q
+on:
+  push:
+    branches: [w08-final-free-source-20260912]
+    paths:
+      - '.github/workflows/w08_t146_json_api_quick_probe_v7q.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  quick:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: w08-final-free-source-20260912
+      - name: Quick historical boundary probe
+        shell: bash
+        run: |
+          mkdir -p out_w08_t146_json_v7q
+          python3 - <<'PY'
+          import json, urllib.request, pathlib, hashlib, gzip, datetime as dt
+          out=pathlib.Path('out_w08_t146_json_v7q'); url='https://mops.twse.com.tw/mops/api/t146sb10'
+          years=[93,100,105,106,110,115]; markets=['sii','pub']; rec=[]
+          for y in years:
+            for m in markets:
+              body=json.dumps({'scopeType':'2','companyId':'','dateType':'1','firstDate':f'{y:03d}0101','lastDate':f'{y+1:03d}0101','marketKind':m,'announcementBasis':'0','dateRangeType':'','announcementType':'1','sort':'1','encodeURIComponent':1,'step':1,'firstin':1,'off':1},separators=(',',':')).encode()
+              label=f'y{y:03d}_{m}'; (out/f'{label}.request.json').write_bytes(body)
+              r={'year':y,'market':m,'label':label,'request_sha256':hashlib.sha256(body).hexdigest()}
+              try:
+                q=urllib.request.Request(url,data=body,method='POST',headers={'User-Agent':'Mozilla/5.0','Accept':'application/json,*/*','Content-Type':'application/json','Origin':'https://mops.twse.com.tw','Referer':'https://mops.twse.com.tw/mops/#/web/t146sb10'})
+                with urllib.request.urlopen(q,timeout=20) as x: raw=x.read(); r['http_status']=x.status
+                (out/f'{label}.response.bin').write_bytes(raw)
+                with gzip.GzipFile(out/f'{label}.response.bin.gz','wb',mtime=0) as g:g.write(raw)
+                p=json.loads(raw.decode()); result=p.get('result'); rows=0
+                if isinstance(result,list): rows=sum(len(z.get('data',[])) for z in result if isinstance(z,dict) and isinstance(z.get('data'),list))
+                r.update(api_code=p.get('code'),api_message=p.get('message'),response_bytes=len(raw),response_sha256=hashlib.sha256(raw).hexdigest(),row_count=rows,result_groups=len(result) if isinstance(result,list) else None)
+              except Exception as e:r['error']=repr(e)
+              rec.append(r); print(json.dumps(r,ensure_ascii=False),flush=True)
+          s={'schema':'w08_t146_json_api_quick_probe_v7q','endpoint':url,'records':rec,'old_nonempty':[r['label'] for r in rec if r['year']<=105 and r.get('api_code')==200 and r.get('row_count',0)>0],'recent_nonempty':[r['label'] for r in rec if r['year']>=106 and r.get('api_code')==200 and r.get('row_count',0)>0],'generated_at':dt.datetime.now(dt.timezone.utc).isoformat()}
+          (out/'PROBE.json').write_text(json.dumps(s,ensure_ascii=False,indent=2,sort_keys=True)+'\n')
+          PY
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: w08-t146-json-api-quick-probe-v7q
+          path: out_w08_t146_json_v7q/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
