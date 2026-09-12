@@ -1,0 +1,106 @@
+name: P2A dynamic V10 contract probe 20260912
+
+on:
+  push:
+    branches: [p2a-transport-20260912]
+    paths: [.github/workflows/p2a_dynamic_v10_contract_probe_20260912.yml]
+
+permissions:
+  contents: write
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: p2a-transport-20260912
+      - name: Probe official ajax t21sc03 full-market request contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p probe_out p2a-results
+          python3 - <<'PY'
+          import urllib.request, urllib.parse, urllib.error, json, hashlib, re, html as hm, pathlib, datetime as dt, time
+          BASE='https://mops.twse.com.tw/mops/web/ajax_t21sc03'
+          REF='https://mops.twse.com.tw/mops/web/t21sc03'
+          UA='Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120 Safari/537.36'
+          samples=[(90,5),(90,6),(90,8),(98,12),(99,1),(101,12),(102,1)]
+          markets={'TWSE':'sii','TPEX':'otc'}
+          shapes={
+            'basic': lambda mk,y,m:{'TYPEK':mk,'year':str(y),'month':str(m)},
+            'full_blank_company': lambda mk,y,m:{'encodeURIComponent':'1','step':'1','firstin':'1','off':'1','keyword4':'','code1':'','TYPEK2':'','checkbtn':'','queryName':'co_id','inpuType':'co_id','TYPEK':mk,'isnew':'false','co_id':'','year':str(y),'month':str(m).zfill(2)},
+            'full_no_company': lambda mk,y,m:{'encodeURIComponent':'1','step':'1','firstin':'1','off':'1','keyword4':'','code1':'','TYPEK2':'','checkbtn':'','TYPEK':mk,'isnew':'false','year':str(y),'month':str(m).zfill(2)},
+          }
+          def sha(b): return hashlib.sha256(b).hexdigest()
+          def decode(b):
+            for e in ('utf-8','utf-8-sig','big5','cp950'):
+              try:return b.decode(e),e
+              except:pass
+            return b.decode('utf-8','replace'),'utf-8-replace'
+          def validate(b):
+            if not b:return {'valid':False,'rows':0,'codes':0,'encoding':None,'title':False,'head':''}
+            text,enc=decode(b); title=('營業收入' in text or '每月營收' in text)
+            codes=[]; widths=[]
+            for tr in re.findall(r'<tr\b[^>]*>([\s\S]*?)</tr>',text,re.I):
+              cs=[hm.unescape(re.sub(r'<[^>]*>','',x)).replace('\xa0',' ').strip() for x in re.findall(r'<t[dh]\b[^>]*>([\s\S]*?)</t[dh]>',tr,re.I)]
+              for i,x in enumerate(cs[:4]):
+                if re.fullmatch(r'\d{4,6}',x): codes.append(x); widths.append(len(cs)); break
+            blocked=('FOR SECURITY REASONS' in text or '安全性考量' in text)
+            nodata=any(x in text for x in ['查無資料','無資料','Resource not found'])
+            return {'valid':bool(title and len(set(codes))>=5 and not blocked),'rows':len(codes),'codes':len(set(codes)),'encoding':enc,'title':title,'blocked':blocked,'nodata_marker':nodata,'widths':sorted(set(widths)),'head':re.sub(r'\s+',' ',text[:300])}
+          def req(method,params):
+            q=urllib.parse.urlencode(params).encode()
+            if method=='GET': url=BASE+'?'+q.decode(); data=None
+            else: url=BASE; data=q
+            headers={'User-Agent':UA,'Referer':REF,'Accept':'text/html,*/*','Content-Type':'application/x-www-form-urlencoded'}
+            at=dt.datetime.now(dt.timezone.utc).isoformat().replace('+00:00','Z')
+            try:
+              with urllib.request.urlopen(urllib.request.Request(url,data=data,headers=headers,method=method),timeout=35) as r:
+                b=r.read(); return {'transport_ok':True,'status':getattr(r,'status',200),'body':b,'headers':dict(r.headers.items()),'final_url':r.geturl(),'retrieved_at':at}
+            except urllib.error.HTTPError as e:
+              b=e.read() if hasattr(e,'read') else b''; return {'transport_ok':True,'status':e.code,'body':b,'headers':dict(e.headers.items()) if e.headers else {},'final_url':url,'retrieved_at':at}
+            except Exception as e:return {'transport_ok':False,'status':None,'body':b'','headers':{},'final_url':url,'retrieved_at':at,'error':repr(e)}
+          rows=[]
+          for market,mk in markets.items():
+            for y,m in samples:
+              for shape,fn in shapes.items():
+                for method in ('GET','POST'):
+                  p=fn(mk,y,m); r=req(method,p); v=validate(r['body'])
+                  rec={'market':market,'roc_year':y,'month':m,'shape':shape,'method':method,'endpoint':BASE,'params':p,'http_status':r['status'],'transport_ok':r['transport_ok'],'bytes':len(r['body']),'sha256':sha(r['body']) if r['body'] else None,'retrieved_at':r['retrieved_at'],'response_headers':r['headers'],'error':r.get('error'),**v}
+                  rows.append(rec)
+                  if r['body']:
+                    pathlib.Path(f'probe_out/{market}_{y:03d}_{m:02d}_{shape}_{method}.response.bin').write_bytes(r['body'])
+                  time.sleep(.05)
+          good=[x for x in rows if x['valid']]
+          by={}
+          for market in markets:
+            by[market]={}
+            for y,m in samples:
+              g=[x for x in good if x['market']==market and x['roc_year']==y and x['month']==m]
+              by[market][f'{y:03d}-{m:02d}']=[{'shape':x['shape'],'method':x['method'],'bytes':x['bytes'],'sha256':x['sha256'],'rows':x['rows'],'codes':x['codes'],'encoding':x['encoding']} for x in g]
+          out={'schema':'p2a_dynamic_v10_contract_probe_v1','endpoint':BASE,'referer':REF,'samples':samples,'market_mapping':markets,'valid_contracts':by,'all_observations':rows}
+          pathlib.Path('probe_out/P2A_DYNAMIC_V10_CONTRACT_PROBE.json').write_text(json.dumps(out,ensure_ascii=False,indent=2,sort_keys=True)+'\n',encoding='utf-8')
+          summary={'schema':'p2a_dynamic_v10_contract_probe_summary_v1','run_id':__import__('os').environ.get('GITHUB_RUN_ID'),'endpoint':BASE,'valid_contracts':by,'valid_observation_count':len(good)}
+          pathlib.Path('p2a-results/p2a_dynamic_v10_contract_latest.json').write_text(json.dumps(summary,ensure_ascii=False,indent=2,sort_keys=True)+'\n',encoding='utf-8')
+          print(json.dumps(summary,ensure_ascii=False))
+          if not any(by['TWSE']['090-08']): raise SystemExit('NO_VALID_DYNAMIC_TWSE_090_08')
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: P2A_DYNAMIC_V10_CONTRACT_PROBE_20260912
+          path: probe_out/
+          retention-days: 7
+      - name: Publish result pointer
+        if: always()
+        shell: bash
+        run: |
+          if [ -f p2a-results/p2a_dynamic_v10_contract_latest.json ]; then
+            git config user.name 'p2a-automation'
+            git config user.email 'actions@users.noreply.github.com'
+            git add p2a-results/p2a_dynamic_v10_contract_latest.json
+            git commit -m 'P2-A dynamic V10 contract probe result ${{ github.run_id }}' || true
+            git push origin HEAD:p2a-transport-20260912
+          fi
