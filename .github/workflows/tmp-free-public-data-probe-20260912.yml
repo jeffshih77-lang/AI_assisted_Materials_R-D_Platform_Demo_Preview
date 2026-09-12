@@ -1,93 +1,49 @@
-name: tmp-free-public-data-probe-20260912
+name: tmp-free-institutional-candidate-probe-20260912
 on:
   push:
     branches: [tmp-free-public-data-probe-20260912]
-  workflow_dispatch:
 jobs:
   probe:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-      - name: Fetch public sources
+      - name: Probe free FinMind institutional candidate codes
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p out
+          mkdir -p out/raw
           python - <<'PY'
-          import requests, json, hashlib, csv, io, os, re
-          from urllib.parse import urlencode
-
-          out='out'
-          summary={'finmind':{},'legacy':[]}
-
-          # FinMind public/free product universe; no token, no paid endpoint.
-          u='https://api.finmindtrade.com/api/v4/data'
-          r=requests.get(u, params={'dataset':'TaiwanFutOptDailyInfo'}, timeout=60)
-          raw=r.content
-          open(f'{out}/finmind_TaiwanFutOptDailyInfo.json','wb').write(raw)
-          ent={'http_status':r.status_code,'bytes':len(raw),'sha256':hashlib.sha256(raw).hexdigest(),'content_type':r.headers.get('content-type')}
-          try:
-              j=r.json(); rows=j.get('data',[]) if isinstance(j,dict) else []
-              ent['api_status']=j.get('status') if isinstance(j,dict) else None
-              ent['msg']=j.get('msg') if isinstance(j,dict) else None
-              ent['rows']=len(rows)
-              ent['types']={}
-              for x in rows:
-                  t=x.get('type'); ent['types'][t]=ent['types'].get(t,0)+1
-              with open(f'{out}/finmind_master.csv','w',encoding='utf-8',newline='') as f:
-                  w=csv.writer(f); w.writerow(['code','type','name'])
-                  for x in rows: w.writerow([x.get('code',''),x.get('type',''),x.get('name','')])
-          except Exception as e:
-              ent['parse_error']=repr(e)
-          summary['finmind']=ent
-
-          sess=requests.Session()
-          sess.headers.update({'User-Agent':'Mozilla/5.0 public-data-validation/1.0'})
-          endpoints=[
-              ('fut','https://www.taifex.com.tw/cht/3/dlFutContractsDateDown','TX'),
-              ('fut_bq','https://www.bq888.taifex.com.tw/cht/3/dlFutContractsDateDown','TX'),
-              ('opt','https://www.taifex.com.tw/cht/3/dlOptContractsDateDown','TXO'),
-              ('opt_bq','https://www.bq888.taifex.com.tw/cht/3/dlOptContractsDateDown','TXO'),
-              ('callput','https://www.taifex.com.tw/cht/3/dlCallsAndPutsDateDown','TXO'),
-              ('callput_bq','https://www.bq888.taifex.com.tw/cht/3/dlCallsAndPutsDateDown','TXO'),
-          ]
-          dates=['2010/06/18','2015/06/18','2017/06/19','2018/06/05','2023/09/11']
-          for tag,url,cid in endpoints:
-              for d in dates:
-                  payload={'firstDate':d+' 00:00','lastDate':d+' 00:00','queryStartDate':d,'queryEndDate':d,'commodityId':cid}
-                  rec={'tag':tag,'url':url,'date':d,'commodityId':cid}
+          import requests, json, hashlib, os, time
+          BASE='https://api.finmindtrade.com/api/v4/data'
+          start='2018-06-05'; end='2023-09-15'
+          futures=['TX','TXF','TE','EXF','TF','FXF','MTX','ZEF','ZFF','TMF','GTF','G2F','E4F','BTF','SOF','SHF','M1F','XIF','TJF','UDF','SPF','UNF','SXF','F1F','STF','SF','ETF']
+          options=['TXO','TEO','TFO','STO','STC','ETC']
+          summary=[]
+          s=requests.Session(); s.headers.update({'User-Agent':'public-data-validation/1.0'})
+          for dataset,codes in [('TaiwanFuturesInstitutionalInvestors',futures),('TaiwanOptionInstitutionalInvestors',options)]:
+              for code in codes:
+                  rec={'dataset':dataset,'data_id':code,'start_date':start,'end_date':end}
                   try:
-                      rr=sess.post(url,data=payload,timeout=45,allow_redirects=True)
-                      b=rr.content
-                      fn=f"legacy_{tag}_{d.replace('/','')}.bin"
-                      open(f'{out}/{fn}','wb').write(b)
-                      rec.update(http_status=rr.status_code,final_url=rr.url,bytes=len(b),sha256=hashlib.sha256(b).hexdigest(),content_type=rr.headers.get('content-type'))
-                      text=''
-                      for enc in ('utf-8-sig','big5','cp950','utf-8'):
-                          try: text=b.decode(enc); rec['encoding']=enc; break
-                          except: pass
-                      if text:
-                          rec['preview']=re.sub(r'\\s+',' ',text[:400])
-                          lines=[x for x in text.splitlines() if x.strip()]
-                          rec['lines']=len(lines)
-                          rec['has_header']=('日期' in text[:1000] and ('商品名稱' in text[:1000] or '契約名稱' in text[:1000]))
-                          if rec['has_header']:
-                              vals=[]
-                              for line in lines[1:]:
-                                  first=line.split(',')[0].strip().strip('"')
-                                  if re.fullmatch(r'20\\d{2}/\\d{2}/\\d{2}',first): vals.append(first)
-                              rec['date_tokens_min']=min(vals) if vals else None
-                              rec['date_tokens_max']=max(vals) if vals else None
-                              rec['date_token_count']=len(set(vals))
+                      r=s.get(BASE,params={'dataset':dataset,'data_id':code,'start_date':start,'end_date':end},timeout=60)
+                      b=r.content; rec.update(http_status=r.status_code,bytes=len(b),sha256=hashlib.sha256(b).hexdigest(),content_type=r.headers.get('content-type'))
+                      j=r.json(); rows=j.get('data',[]) if isinstance(j,dict) else []
+                      rec['api_status']=j.get('status') if isinstance(j,dict) else None; rec['msg']=j.get('msg') if isinstance(j,dict) else None; rec['rows']=len(rows)
+                      if rows:
+                          dates=sorted({x.get('date') for x in rows if x.get('date')})
+                          names=sorted({str(x.get('name')) for x in rows if x.get('name') is not None})
+                          inst=sorted({str(x.get('institutional_investors')) for x in rows if x.get('institutional_investors') is not None})
+                          rec['date_min']=dates[0] if dates else None; rec['date_max']=dates[-1] if dates else None; rec['date_count']=len(dates); rec['names']=names[:20]; rec['institutional_investors']=inst; rec['columns']=sorted(rows[0].keys())
+                          open(f'out/raw/{dataset}__{code}.json','wb').write(b)
                   except Exception as e:
                       rec['error']=repr(e)
-                  summary['legacy'].append(rec)
-          open(f'{out}/summary.json','w',encoding='utf-8').write(json.dumps(summary,ensure_ascii=False,indent=2))
-          print(json.dumps(summary,ensure_ascii=False,indent=2))
+                  summary.append(rec)
+                  print(json.dumps(rec,ensure_ascii=False))
+                  time.sleep(0.15)
+          open('out/summary.json','w',encoding='utf-8').write(json.dumps(summary,ensure_ascii=False,indent=2))
           PY
       - uses: actions/upload-artifact@v4
         with:
-          name: tmp-free-public-data-probe-20260912
+          name: tmp-free-institutional-candidate-probe-20260912
           path: out/
           retention-days: 1
