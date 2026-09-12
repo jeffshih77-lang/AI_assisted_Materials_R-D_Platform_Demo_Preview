@@ -1,0 +1,179 @@
+name: P4-A V5.16 bulk promote existing 5p evidence
+on:
+  push:
+    paths:
+      - '.github/workflows/p4a_v5_16_bulk_promote_existing_5p.yml'
+permissions:
+  actions: read
+  contents: read
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      g1: ${{ steps.p.outputs.g1 }}
+      g2: ${{ steps.p.outputs.g2 }}
+      g3: ${{ steps.p.outputs.g3 }}
+      g4: ${{ steps.p.outputs.g4 }}
+      g5: ${{ steps.p.outputs.g5 }}
+      g6: ${{ steps.p.outputs.g6 }}
+      g7: ${{ steps.p.outputs.g7 }}
+      g8: ${{ steps.p.outputs.g8 }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      RUN5: '34691917746'
+    steps:
+      - uses: actions/checkout@v4
+      - id: p
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh api "repos/$REPO/actions/runs/$RUN5/artifacts?per_page=100" --paginate --slurp > arts.json
+          python - <<'PY'
+          import json,re,os
+          plan=json.load(open('p4a_runner/P4A_FORMAL_MISSING_LIVE.json'))
+          assert plan['authoritative_audit_drive_id']=='1M8lSuMKu-rr9Xw-tdaR4zLHTH9SQ9R6x'
+          missing={(int(r['roc']),r['kind'],x) for r in plan['exact_missing_ranges'] for x in range(int(r['start']),int(r['end'])+1)}
+          assert len(missing)==1736
+          arts=[]
+          for page in json.load(open('arts.json')): arts+=page.get('artifacts',[])
+          pat=re.compile(r'^p4a-v5r5-gap-ROC([0-9]+)-([LO])-P([0-9]+)-([0-9]+)$')
+          latest={}
+          for a in arts:
+            if a.get('expired'): continue
+            m=pat.match(a.get('name',''))
+            if not m: continue
+            y,k,s,e=int(m.group(1)),m.group(2),int(m.group(3)),int(m.group(4))
+            q={(y,k,x) for x in range(s,e+1)}
+            if not q<=missing: continue
+            key=(y,k,s,e)
+            if key not in latest or int(a['id'])>int(latest[key]['id']): latest[key]=a
+          rows=[];covered=set()
+          for (y,k,s,e),a in sorted(latest.items()):
+            q={(y,k,x) for x in range(s,e+1)}
+            assert not (covered & q),(a['name'],'page overlap')
+            covered|=q
+            rows.append({'artifact_id':int(a['id']),'artifact_name':a['name'],'digest':a.get('digest') or '','roc':y,'kind':k,'start':s,'end':e,'page_count':e-s+1})
+          residual=missing-covered
+          assert len(rows)==349,(len(rows),len(covered))
+          assert len(covered)==1735,len(covered)
+          assert residual=={(115,'L',232)},residual
+          groups=[rows[i::8] for i in range(8)]
+          with open(os.environ['GITHUB_OUTPUT'],'a') as f:
+            for i,g in enumerate(groups,1): f.write(f"g{i}="+json.dumps(g,separators=(',',':'))+'\n')
+          print({'artifacts':len(rows),'pages':len(covered),'residual':sorted(residual),'groups':[len(g) for g in groups]})
+          PY
+  h1:
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      GROUP_NO: '1'
+      GROUP_JSON: ${{ needs.plan.outputs.g1 }}
+    steps: &harvest_steps
+      - uses: actions/checkout@v4
+      - name: Validate and bundle immutable existing 5p artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p work/outer work/unpack drive_ready
+          python - <<'PY'
+          import json,os,pathlib,hashlib,zipfile,subprocess,posixpath,io
+          rows=json.loads(os.environ['GROUP_JSON']); repo=os.environ['REPO']; token=os.environ['GH_TOKEN']; gno=int(os.environ['GROUP_NO'])
+          entries=[];pages=set();detail=provider=anomaly=0
+          for r in rows:
+            aid=int(r['artifact_id']); outer=pathlib.Path('work/outer')/f'artifact_{aid}.zip'
+            url=f'https://api.github.com/repos/{repo}/actions/artifacts/{aid}/zip'
+            subprocess.run(['curl','-fL','--retry','5','--retry-delay','2','-H',f'Authorization: Bearer {token}','-H','X-GitHub-Api-Version: 2022-11-28','-o',str(outer),url],check=True)
+            ob=outer.read_bytes(); osha=hashlib.sha256(ob).hexdigest(); dg=r.get('digest') or ''
+            if dg.startswith('sha256:'): assert osha==dg.split(':',1)[1],(aid,'outer digest mismatch')
+            dest=pathlib.Path('work/unpack')/str(aid);dest.mkdir(parents=True,exist_ok=True)
+            with zipfile.ZipFile(outer) as oz: oz.extractall(dest)
+            childs=[q for q in dest.rglob('*.zip') if q.is_file()];assert len(childs)==1,(aid,len(childs))
+            child=childs[0];cb=child.read_bytes();csha=hashlib.sha256(cb).hexdigest()
+            with zipfile.ZipFile(io.BytesIO(cb)) as cz:
+              names=set(cz.namelist()); mans=[n for n in names if n=='MANIFEST.json' or n.endswith('/MANIFEST.json')];assert len(mans)==1
+              mn=mans[0];root=posixpath.dirname(mn);man=json.loads(cz.read(mn).decode('utf-8-sig'));c=man['coverage'];a=man['assertions'];caps=man.get('captures',[]);anos=man.get('anomalies',[])
+              assert man['schema']=='p4a_material_info_page_chunk_v4'
+              assert (int(c['roc_year']),c['kind'],int(c['start_page']),int(c['end_page']))==(int(r['roc']),r['kind'],int(r['start']),int(r['end']))
+              assert int(a['page_count'])==int(r['page_count']) and int(a['list_capture_count'])==int(r['page_count'])
+              assert a['all_http_200'] is True and a['all_payload_nonempty'] is True
+              assert all(x.get('http_status')==200 and int(x.get('payload_bytes',0))>0 for x in caps)
+              assert int(a['nonstandard_detail_count'])==len(anos)
+              assert all(x.get('disposition')=='PRESERVE_RAW_DO_NOT_ZERO_FILL' for x in anos)
+              for cap in caps:
+                for pf,hf in [('raw_path','payload_sha256'),('gzip_path','gzip_sha256')]:
+                  q=posixpath.join(root,cap[pf]); assert q in names,(aid,q);dat=cz.read(q);assert len(dat)>0 and hashlib.sha256(dat).hexdigest()==cap[hf]
+              detail+=int(a['detail_capture_count']);provider+=int(a['provider_marker_detail_count']);anomaly+=int(a['nonstandard_detail_count'])
+            qpages={(int(r['roc']),r['kind'],p) for p in range(int(r['start']),int(r['end'])+1)};assert not(pages&qpages);pages|=qpages
+            stored=f'artifact_{aid}__{child.name}'
+            entries.append({'artifact_id':aid,'artifact_name':r['artifact_name'],'artifact_outer_sha256':osha,'child_stored_name':stored,'child_original_name':child.name,'child_sha256':csha,'child_size':len(cb),'coverage':{'roc_year':int(r['roc']),'kind':r['kind'],'start_page':int(r['start']),'end_page':int(r['end']),'page_count':int(r['page_count'])},'_child_path':str(child)})
+          target=80*1024*1024;groups=[];cur=[];sz=0
+          for e in entries:
+            cs=int(e['child_size']);assert cs<100*1024*1024
+            if cur and sz+cs>target:groups.append(cur);cur=[];sz=0
+            cur.append(e);sz+=cs
+          if cur:groups.append(cur)
+          for pi,grp in enumerate(groups,1):
+            clean=[{k:v for k,v in e.items() if k!='_child_path'} for e in grp];pc=sum(int(e['coverage']['page_count']) for e in grp)
+            idx={'schema':'p4a_formal_missing_5p_v5_16_drive_bundle_v1','lane_code':'P4-A','dataset':'MATERIAL_INFO','source_run_id':34691917746,'group':gno,'part':pi,'part_count':len(groups),'artifact_count':len(grp),'unique_page_count':pc,'entries':clean}
+            out=pathlib.Path('drive_ready')/f'P4A-FORMAL-MISSING-5P-V5.16-G{gno:02d}-PART{pi:03d}-RUN34691917746.zip'
+            with zipfile.ZipFile(out,'w',compression=zipfile.ZIP_STORED) as z:
+              z.writestr('BUNDLE_INDEX.json',(json.dumps(idx,ensure_ascii=False,indent=2,sort_keys=True)+'\n').encode())
+              for e in grp:z.write(e['_child_path'],e['child_stored_name'])
+            assert out.stat().st_size<100*1024*1024
+          summary={'schema':'p4a_v5_16_existing_5p_harvest_group_v1','source_run_id':34691917746,'source_requests_made_by_harvest':False,'group':gno,'artifact_count':len(entries),'unique_pages':len(pages),'detail_capture_count':detail,'provider_marker_detail_count':provider,'nonstandard_detail_count':anomaly,'bundle_parts':len(groups)}
+          pathlib.Path('drive_ready')/f'P4A_V5_16_5P_HARVEST_G{gno:02d}_SUMMARY.json'
+          (pathlib.Path('drive_ready')/f'P4A_V5_16_5P_HARVEST_G{gno:02d}_SUMMARY.json').write_text(json.dumps(summary,ensure_ascii=False,indent=2,sort_keys=True)+'\n')
+          print(summary)
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: p4a-v5-16-5p-harvest-g${{ env.GROUP_NO }}
+          path: drive_ready/*
+          if-no-files-found: error
+          retention-days: 3
+  h2:
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env: { GH_TOKEN: "${{ github.token }}", REPO: "${{ github.repository }}", GROUP_NO: '2', GROUP_JSON: "${{ needs.plan.outputs.g2 }}" }
+    steps: *harvest_steps
+  h3:
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env: { GH_TOKEN: "${{ github.token }}", REPO: "${{ github.repository }}", GROUP_NO: '3', GROUP_JSON: "${{ needs.plan.outputs.g3 }}" }
+    steps: *harvest_steps
+  h4:
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env: { GH_TOKEN: "${{ github.token }}", REPO: "${{ github.repository }}", GROUP_NO: '4', GROUP_JSON: "${{ needs.plan.outputs.g4 }}" }
+    steps: *harvest_steps
+  h5:
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env: { GH_TOKEN: "${{ github.token }}", REPO: "${{ github.repository }}", GROUP_NO: '5', GROUP_JSON: "${{ needs.plan.outputs.g5 }}" }
+    steps: *harvest_steps
+  h6:
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env: { GH_TOKEN: "${{ github.token }}", REPO: "${{ github.repository }}", GROUP_NO: '6', GROUP_JSON: "${{ needs.plan.outputs.g6 }}" }
+    steps: *harvest_steps
+  h7:
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env: { GH_TOKEN: "${{ github.token }}", REPO: "${{ github.repository }}", GROUP_NO: '7', GROUP_JSON: "${{ needs.plan.outputs.g7 }}" }
+    steps: *harvest_steps
+  h8:
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env: { GH_TOKEN: "${{ github.token }}", REPO: "${{ github.repository }}", GROUP_NO: '8', GROUP_JSON: "${{ needs.plan.outputs.g8 }}" }
+    steps: *harvest_steps
