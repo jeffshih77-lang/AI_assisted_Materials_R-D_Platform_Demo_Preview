@@ -1,0 +1,20 @@
+name: P4-A cancel stale 34684185077 once
+on:
+  push:
+    paths:
+      - '.github/workflows/p4a_cancel_stale_34684185077_once.yml'
+permissions:
+  actions: write
+  contents: read
+jobs:
+  cancel:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+    steps:
+      - run: |
+          set -euo pipefail
+          s=$(gh api "repos/$REPO/actions/runs/34684185077" --jq '.status')
+          echo "before=$s"
+          if [ "$s" != completed ]; then gh api -X POST "repos/$REPO/actions/runs/34684185077/cancel"; fi
