@@ -1,0 +1,139 @@
+name: P4-A formal exact missing V5 10-page repair
+on:
+  push:
+    paths:
+      - '.github/workflows/p4a_formal_exact_missing_v5_10p.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      m1: ${{ steps.plan.outputs.m1 }}
+      m2: ${{ steps.plan.outputs.m2 }}
+      m3: ${{ steps.plan.outputs.m3 }}
+      m4: ${{ steps.plan.outputs.m4 }}
+      page_count: ${{ steps.plan.outputs.page_count }}
+      item_count: ${{ steps.plan.outputs.item_count }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: plan
+        run: |
+          python - <<'PY'
+          import json, os
+          p=json.load(open('p4a_runner/P4A_FORMAL_EXACT_MISSING_PLAN_V5_20260912.json'))
+          assert p['schema']=='p4a_formal_exact_missing_plan_v5'
+          assert p['authoritative_audit_drive_id']=='1xxO1eRiGAW9V1iE_nZdvT48LLEUDg7Gj'
+          assert p['authoritative_audit_sha256']=='038febd8bbdc32cf7e5243c843d975d4a8711ba27a338ec910428b1173e3fe2a'
+          assert p['formal_missing_pages']==8425 and p['page_count_sum']==8425
+          xs=[]
+          for x in p['items']:
+            q=x['start']
+            while q<=x['end']:
+              e=min(x['end'],q+9)
+              xs.append({'roc':x['roc'],'kind':x['kind'],'start':q,'end':e})
+              q=e+1
+          assert sum(x['end']-x['start']+1 for x in xs)==8425
+          assert len(xs)==857
+          groups=[xs[i::4] for i in range(4)]
+          assert all(len(g)<=256 for g in groups)
+          with open(os.environ['GITHUB_OUTPUT'],'a') as f:
+            for i,g in enumerate(groups,1):
+              f.write(f'm{i}='+json.dumps({'include':g},separators=(',',':'))+'\n')
+            f.write('page_count=8425\n')
+            f.write('item_count=857\n')
+          print('frozen pages',8425,'10p work items',len(xs),'group sizes',[len(g) for g in groups])
+          PY
+
+  capture1:
+    needs: plan
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix: ${{ fromJson(needs.plan.outputs.m1) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      ROC_YEAR: ${{ matrix.roc }}
+      KIND: ${{ matrix.kind }}
+      START_PAGE: ${{ matrix.start }}
+      END_PAGE: ${{ matrix.end }}
+      DETAIL_WORKERS: '4'
+    steps: &capture_steps
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - name: Capture exact frozen missing pages
+        run: |
+          cp p4a_runner/p4a_material_info_page_chunk_v4.py /tmp/p4a_collector.py
+          sed -i 's/def get(url, retries=3):/def get(url, retries=20):/' /tmp/p4a_collector.py
+          python /tmp/p4a_collector.py
+      - name: Package immutable RAW
+        run: |
+          python - <<'PY'
+          import pathlib,zipfile
+          roots=[p for p in pathlib.Path('out_p4a_chunk').iterdir() if p.is_dir()]
+          assert len(roots)==1, roots
+          root=roots[0]; out=pathlib.Path(root.name+'.zip')
+          with zipfile.ZipFile(out,'w',zipfile.ZIP_DEFLATED) as z:
+            for p in sorted(root.rglob('*')):
+              if p.is_file(): z.write(p,p.relative_to(root.parent))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: p4a-gap-ROC${{ matrix.roc }}-${{ matrix.kind }}-P${{ matrix.start }}-${{ matrix.end }}
+          path: P4A-MATERIAL-ROC${{ matrix.roc }}-${{ matrix.kind }}-P*.zip
+          if-no-files-found: error
+          retention-days: 2
+
+  capture2:
+    needs: [plan, capture1]
+    if: ${{ always() && needs.plan.result == 'success' }}
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix: ${{ fromJson(needs.plan.outputs.m2) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      ROC_YEAR: ${{ matrix.roc }}
+      KIND: ${{ matrix.kind }}
+      START_PAGE: ${{ matrix.start }}
+      END_PAGE: ${{ matrix.end }}
+      DETAIL_WORKERS: '4'
+    steps: *capture_steps
+
+  capture3:
+    needs: [plan, capture2]
+    if: ${{ always() && needs.plan.result == 'success' }}
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix: ${{ fromJson(needs.plan.outputs.m3) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      ROC_YEAR: ${{ matrix.roc }}
+      KIND: ${{ matrix.kind }}
+      START_PAGE: ${{ matrix.start }}
+      END_PAGE: ${{ matrix.end }}
+      DETAIL_WORKERS: '4'
+    steps: *capture_steps
+
+  capture4:
+    needs: [plan, capture3]
+    if: ${{ always() && needs.plan.result == 'success' }}
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix: ${{ fromJson(needs.plan.outputs.m4) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      ROC_YEAR: ${{ matrix.roc }}
+      KIND: ${{ matrix.kind }}
+      START_PAGE: ${{ matrix.start }}
+      END_PAGE: ${{ matrix.end }}
+      DETAIL_WORKERS: '4'
+    steps: *capture_steps
