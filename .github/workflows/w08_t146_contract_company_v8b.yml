@@ -1,0 +1,65 @@
+name: W08 T146 contract company v8b
+on:
+  push:
+    branches: [w08-final-free-source-20260912]
+    paths:
+      - '.github/workflows/w08_t146_contract_company_v8b.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: w08-final-free-source-20260912
+      - name: Validate padded Dec31 and company-scope historical access
+        shell: bash
+        run: |
+          mkdir -p out_w08_t146_v8b
+          python3 - <<'PY'
+          import json,urllib.request,pathlib,hashlib,gzip,re,datetime as dt
+          O=pathlib.Path('out_w08_t146_v8b'); U='https://mops.twse.com.tw/mops/api/t146sb10'
+          def sha(b):return hashlib.sha256(b).hexdigest()
+          def one(label,y,market,scope,company):
+            body={'scopeType':scope,'companyId':company,'dateType':'1','firstDate':f'{y:03d}0101','lastDate':f'{y:03d}1231','marketKind':market,'announcementBasis':'0','dateRangeType':'','announcementType':'1','sort':'1','encodeURIComponent':1,'step':1,'firstin':1,'off':1}
+            b=json.dumps(body,separators=(',',':')).encode(); (O/f'{label}.request.json').write_bytes(b)
+            q=urllib.request.Request(U,data=b,method='POST',headers={'User-Agent':'Mozilla/5.0','Accept':'application/json,*/*','Content-Type':'application/json','Origin':'https://mops.twse.com.tw','Referer':'https://mops.twse.com.tw/mops/#/web/t146sb10'})
+            with urllib.request.urlopen(q,timeout=90) as r: raw=r.read(); st=r.status
+            (O/f'{label}.response.bin').write_bytes(raw)
+            with gzip.GzipFile(O/f'{label}.response.bin.gz','wb',mtime=0) as g:g.write(raw)
+            p=json.loads(raw.decode()); result=p.get('result'); rows=[]; dates=[]
+            if isinstance(result,list):
+              for x in result:
+                if not isinstance(x,dict):continue
+                titles=x.get('titles') or []; data=x.get('data') or []; mains=[z.get('main','') if isinstance(z,dict) else str(z) for z in titles]
+                try:di=mains.index('公告日期')
+                except ValueError:di=None
+                rows.extend(data)
+                if di is not None:
+                  for rr in data:
+                    if isinstance(rr,list) and di<len(rr):
+                      s=str(rr[di]).strip()
+                      if re.fullmatch(r'\d{1,3}/\d{1,2}/\d{1,2}',s):dates.append(s)
+            rec={'label':label,'year':y,'market':market,'scopeType':scope,'companyId':company,'http':st,'api_code':p.get('code'),'api_message':p.get('message'),'rows':len(rows),'dates':len(dates),'min_date':min(dates,default=None),'max_date':max(dates,default=None),'out_of_year':sum(int(s.split('/')[0])!=y for s in dates),'response_bytes':len(raw),'response_sha256':sha(raw),'gzip_roundtrip':gzip.decompress((O/f'{label}.response.bin.gz').read_bytes())==raw}
+            print(json.dumps(rec,ensure_ascii=False),flush=True);return rec
+          rec=[]
+          for y in [90,93,94,95,100,105,106]:
+            rec.append(one(f'market_y{y:03d}_sii',y,'sii','2',''))
+          for y in [90,93,94,95,100,105]:
+            rec.append(one(f'company1101_y{y:03d}',y,'sii','1','1101'))
+          s={'schema':'w08_t146_contract_company_v8b','endpoint':U,'records':rec,'assertions':{'all_http_200':all(x['http']==200 for x in rec),'all_gzip_roundtrip':all(x['gzip_roundtrip'] for x in rec),'all_dates_in_year':all(x['out_of_year']==0 for x in rec),'company_1101_roc93_data':next(x for x in rec if x['label']=='company1101_y093')['rows']>0},'generated_at':dt.datetime.now(dt.timezone.utc).isoformat()}
+          (O/'PROBE.json').write_text(json.dumps(s,ensure_ascii=False,indent=2,sort_keys=True)+'\n')
+          print(json.dumps(s['assertions'],ensure_ascii=False),flush=True)
+          PY
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: w08-t146-contract-company-v8b
+          path: out_w08_t146_v8b/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
