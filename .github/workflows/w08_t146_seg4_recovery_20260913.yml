@@ -1,0 +1,31 @@
+name: W08 T146 SEG4 recovery 20260913
+on:
+  push:
+    branches: [w08-final-free-source-20260912]
+    paths: ['.github/workflows/w08_t146_seg4_recovery_20260913.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  seg4:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      SEGMENT: '4'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: w08-final-free-source-20260912
+      - name: Capture official T146 SEG4 ROC097-099 using frozen V8.1 runner
+        run: python3 w08_public_runner/w08_t146_jsonapi_formal_v8.py
+      - name: Upload immutable formal SEG4
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: W08_T146_FORMAL_V8_SEG4_20260912
+          path: |
+            RAW-W08_MOPS_T146_FORMAL_RAW_SEG04_ROC097_099_20260912.zip
+            PACKAGE_INFO.json
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
