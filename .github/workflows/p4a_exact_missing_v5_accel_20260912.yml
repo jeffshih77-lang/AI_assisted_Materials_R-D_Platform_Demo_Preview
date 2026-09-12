@@ -1,0 +1,122 @@
+name: P4-A exact missing V5 accelerated 20260912
+on:
+  push:
+    paths:
+      - '.github/workflows/p4a_exact_missing_v5_accel_20260912.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix_a: ${{ steps.plan.outputs.matrix_a }}
+      matrix_b: ${{ steps.plan.outputs.matrix_b }}
+      item_count: ${{ steps.plan.outputs.item_count }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: plan
+        run: |
+          set -euo pipefail
+          test "$(git hash-object p4a_runner/P4A_EXACT_MISSING_PLAN_V5_20260912.json)" = "e04239d0a345051209cccb82db9d552f11a79a84"
+          python - <<'PY'
+          import json, os
+          p=json.load(open('p4a_runner/P4A_EXACT_MISSING_PLAN_V5_20260912.json'))
+          assert p['authoritative_audit_drive_id']=='1xxO1eRiGAW9V1iE_nZdvT48LLEUDg7Gj'
+          assert p['authoritative_audit_sha256']=='038febd8bbdc32cf7e5243c843d975d4a8711ba27a338ec910428b1173e3fe2a'
+          assert p['required_pages']==13410 and p['formal_covered_pages']==4985 and p['formal_missing_pages']==8425
+          seen=set(); items=[]
+          for r in p['runs']:
+            y=int(r['roc']); k=r['kind']; s=int(r['start']); e=int(r['end'])
+            for page in range(s,e+1):
+              key=(y,k,page); assert key not in seen; seen.add(key)
+            q=s
+            while q<=e:
+              z=min(e,q+24)
+              items.append({'roc':y,'kind':k,'start':q,'end':z,'page_count':z-q+1})
+              q=z+1
+          assert len(seen)==8425
+          assert sum(x['page_count'] for x in items)==8425
+          a=items[0::2]; b=items[1::2]
+          assert len(a)<=256 and len(b)<=256
+          with open(os.environ['GITHUB_OUTPUT'],'a') as f:
+            f.write('matrix_a='+json.dumps({'include':a},separators=(',',':'))+'\n')
+            f.write('matrix_b='+json.dumps({'include':b},separators=(',',':'))+'\n')
+            f.write('item_count='+str(len(items))+'\n')
+          print('validated exact pages',len(seen),'items',len(items),'A',len(a),'B',len(b))
+          PY
+
+  capture_a:
+    needs: plan
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix: ${{ fromJson(needs.plan.outputs.matrix_a) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      ROC_YEAR: ${{ matrix.roc }}
+      KIND: ${{ matrix.kind }}
+      START_PAGE: ${{ matrix.start }}
+      END_PAGE: ${{ matrix.end }}
+      DETAIL_WORKERS: '8'
+    steps: &capture_steps
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Capture frozen exact missing pages only
+        run: |
+          set -euo pipefail
+          cp p4a_runner/p4a_material_info_page_chunk_v4.py /tmp/p4a_collector.py
+          sed -i 's/def get(url, retries=3):/def get(url, retries=20):/' /tmp/p4a_collector.py
+          python /tmp/p4a_collector.py
+      - name: Validate V4 RAW fail closed
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json, os, pathlib
+          root=next(pathlib.Path('out_p4a_chunk').iterdir())
+          m=json.load(open(root/'MANIFEST.json'))
+          assert m['schema']=='p4a_material_info_page_chunk_v4'
+          c=m['coverage']; a=m['assertions']
+          y=int(os.environ['ROC_YEAR']); k=os.environ['KIND']; s=int(os.environ['START_PAGE']); e=int(os.environ['END_PAGE'])
+          assert (int(c['roc_year']),c['kind'],int(c['start_page']),int(c['end_page']))==(y,k,s,e)
+          assert int(a['page_count'])==e-s+1 and int(a['list_capture_count'])==e-s+1
+          assert a['all_http_200'] is True and a['all_payload_nonempty'] is True
+          assert int(a['nonstandard_detail_count'])==len(m.get('anomalies',[]))
+          assert all(x.get('disposition')=='PRESERVE_RAW_DO_NOT_ZERO_FILL' for x in m.get('anomalies',[]))
+          PY
+      - name: Package immutable RAW
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import pathlib,zipfile
+          root=next(pathlib.Path('out_p4a_chunk').iterdir()); out=pathlib.Path(root.name+'.zip')
+          with zipfile.ZipFile(out,'w',zipfile.ZIP_DEFLATED) as z:
+            for p in sorted(root.rglob('*')):
+              if p.is_file(): z.write(p,p.relative_to(root.parent))
+          print(out)
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: p4a-v5a-gap-ROC${{ matrix.roc }}-${{ matrix.kind }}-P${{ matrix.start }}-${{ matrix.end }}
+          path: P4A-MATERIAL-ROC${{ matrix.roc }}-${{ matrix.kind }}-P*.zip
+          if-no-files-found: error
+          retention-days: 3
+
+  capture_b:
+    needs: plan
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix: ${{ fromJson(needs.plan.outputs.matrix_b) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      ROC_YEAR: ${{ matrix.roc }}
+      KIND: ${{ matrix.kind }}
+      START_PAGE: ${{ matrix.start }}
+      END_PAGE: ${{ matrix.end }}
+      DETAIL_WORKERS: '8'
+    steps: *capture_steps
