@@ -1,3 +1,4 @@
+# trigger 2026-09-12 exact candidate harvest; no source requests
 name: P4-A harvest existing candidates v1
 on:
   push:
@@ -128,7 +129,7 @@ jobs:
         run: |
           set -euo pipefail
           python - <<'PY'
-          import os,json,zipfile,pathlib,hashlib,io
+          import os,json,zipfile,pathlib,hashlib
           st=pathlib.Path('stage'); idx=json.loads((st/'BUNDLE_INDEX.json').read_text())
           out=pathlib.Path(f'P4A-HARVEST-EXISTING-CANDIDATES-BATCH{os.environ["BATCH"]}-RUN{os.environ["GITHUB_RUN_ID"]}.zip')
           with zipfile.ZipFile(out,'w',compression=zipfile.ZIP_STORED) as z:
