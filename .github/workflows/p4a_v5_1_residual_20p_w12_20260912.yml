@@ -1,0 +1,181 @@
+name: P4-A V5.1 residual 20p w12 20260912
+on:
+  push:
+    paths:
+      - '.github/workflows/p4a_v5_1_residual_20p_w12_20260912.yml'
+  workflow_dispatch:
+permissions:
+  actions: read
+  contents: read
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      m1: ${{ steps.plan.outputs.m1 }}
+      m2: ${{ steps.plan.outputs.m2 }}
+      m3: ${{ steps.plan.outputs.m3 }}
+      m4: ${{ steps.plan.outputs.m4 }}
+      m5: ${{ steps.plan.outputs.m5 }}
+      item_count: ${{ steps.plan.outputs.item_count }}
+      residual_pages: ${{ steps.plan.outputs.residual_pages }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      PREDECESSOR_RUN: '34685616731'
+    steps:
+      - uses: actions/checkout@v4
+      - id: plan
+        run: |
+          set -euo pipefail
+          # Never overlap source requests with predecessor. Wait for a terminal state.
+          for i in $(seq 1 180); do
+            state=$(gh api "repos/$REPO/actions/runs/$PREDECESSOR_RUN" --jq '.status')
+            echo "predecessor status=$state"
+            [ "$state" = completed ] && break
+            sleep 5
+          done
+          test "$(gh api "repos/$REPO/actions/runs/$PREDECESSOR_RUN" --jq '.status')" = completed
+          gh api "repos/$REPO/actions/runs/$PREDECESSOR_RUN/artifacts?per_page=100" --paginate --slurp > predecessor.json
+          python - <<'PY'
+          import json,re,os
+          p=json.load(open('p4a_runner/P4A_EXACT_MISSING_PLAN_V5_20260912.json'))
+          v5={(int(r['roc']),r['kind'],x) for r in p['runs'] for x in range(int(r['start']),int(r['end'])+1)}
+          formal77={(96,'O',x) for x in range(50,100)} | {(98,'O',x) for x in range(75,100)} | {(98,'O',x) for x in range(125,127)}
+          required=v5-formal77
+          assert len(v5)==8425 and len(formal77)==77 and len(required)==8348
+          arts=[]
+          for obj in json.load(open('predecessor.json')): arts += obj.get('artifacts',[])
+          rx=re.compile(r'^p4a-v5r-gap-ROC(\d+)-([LO])-P(\d+)-(\d+)$')
+          done=set()
+          for a in arts:
+            if a.get('expired'): continue
+            m=rx.match(a.get('name',''))
+            if not m: continue
+            y=int(m.group(1)); k=m.group(2); s=int(m.group(3)); e=int(m.group(4))
+            rng={(y,k,x) for x in range(s,e+1)}
+            assert rng <= required, (a['name'], sorted(rng-required)[:5])
+            if done & rng: raise SystemExit(f'duplicate predecessor success {a["name"]}')
+            done |= rng
+          residual=required-done
+          items=[]
+          for y in range(81,116):
+            for k in ('L','O'):
+              ps=sorted(x for yy,kk,x in residual if yy==y and kk==k)
+              if not ps: continue
+              runs=[]; s=pr=ps[0]
+              for x in ps[1:]:
+                if x==pr+1: pr=x
+                else: runs.append((s,pr)); s=pr=x
+              runs.append((s,pr))
+              for s,e in runs:
+                q=s
+                while q<=e:
+                  z=min(e,q+19)
+                  items.append({'roc':y,'kind':k,'start':q,'end':z,'page_count':z-q+1})
+                  q=z+1
+          assert sum(x['page_count'] for x in items)==len(residual)
+          groups=[items[i::5] for i in range(5)]
+          assert all(len(g)<=256 for g in groups)
+          for i,g in enumerate(groups):
+            if not g: groups[i]=[{'roc':115,'kind':'O','start':0,'end':0,'page_count':1,'noop':True}]
+          with open(os.environ['GITHUB_OUTPUT'],'a') as f:
+            for i,g in enumerate(groups,1): f.write(f'm{i}='+json.dumps({'include':g},separators=(',',':'))+'\n')
+            f.write('item_count='+str(len(items))+'\n')
+            f.write('residual_pages='+str(len(residual))+'\n')
+          print('V5.1 required',len(required),'predecessor success pages',len(done),'residual pages',len(residual),'items',len(items),'groups',[len(g) for g in groups])
+          PY
+
+  capture1:
+    needs: plan
+    if: ${{ needs.plan.outputs.item_count != '0' }}
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix: ${{ fromJson(needs.plan.outputs.m1) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env: &cap_env
+      ROC_YEAR: ${{ matrix.roc }}
+      KIND: ${{ matrix.kind }}
+      START_PAGE: ${{ matrix.start }}
+      END_PAGE: ${{ matrix.end }}
+      DETAIL_WORKERS: '12'
+    steps: &cap_steps
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Capture frozen V5.1 residual only
+        run: |
+          set -euo pipefail
+          cp p4a_runner/p4a_material_info_page_chunk_v4.py /tmp/p4a_collector.py
+          sed -i 's/def get(url, retries=3):/def get(url, retries=20):/' /tmp/p4a_collector.py
+          python /tmp/p4a_collector.py
+      - name: Validate V4 RAW fail closed
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json,os,pathlib
+          roots=[p for p in pathlib.Path('out_p4a_chunk').iterdir() if p.is_dir()]; assert len(roots)==1
+          m=json.load(open(roots[0]/'MANIFEST.json')); assert m['schema']=='p4a_material_info_page_chunk_v4'
+          c=m['coverage']; a=m['assertions']; caps=m.get('captures',[]); anos=m.get('anomalies',[])
+          y=int(os.environ['ROC_YEAR']); k=os.environ['KIND']; s=int(os.environ['START_PAGE']); e=int(os.environ['END_PAGE']); pc=e-s+1
+          assert (int(c['roc_year']),c['kind'],int(c['start_page']),int(c['end_page']))==(y,k,s,e)
+          assert int(a['page_count'])==pc and int(a['list_capture_count'])==pc
+          assert int(a['detail_capture_count'])==sum(1 for x in caps if x.get('stage')=='DETAIL')
+          assert sum(1 for x in caps if x.get('stage')=='LIST')==pc
+          assert a['all_http_200'] is True and a['all_payload_nonempty'] is True
+          assert all(x.get('http_status')==200 and int(x.get('payload_bytes',0))>0 for x in caps)
+          assert int(a['nonstandard_detail_count'])==len(anos)
+          assert all(x.get('disposition')=='PRESERVE_RAW_DO_NOT_ZERO_FILL' for x in anos)
+          assert sorted(int(x['page']) for x in m.get('page_summaries',[]))==list(range(s,e+1))
+          PY
+      - name: Package immutable RAW
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import pathlib,zipfile
+          roots=[p for p in pathlib.Path('out_p4a_chunk').iterdir() if p.is_dir()]; assert len(roots)==1
+          root=roots[0]; out=pathlib.Path(root.name+'.zip')
+          with zipfile.ZipFile(out,'w',zipfile.ZIP_DEFLATED) as z:
+            for p in sorted(root.rglob('*')):
+              if p.is_file(): z.write(p,p.relative_to(root.parent))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: p4a-v5o2-gap-ROC${{ matrix.roc }}-${{ matrix.kind }}-P${{ matrix.start }}-${{ matrix.end }}
+          path: P4A-MATERIAL-ROC${{ matrix.roc }}-${{ matrix.kind }}-P*.zip
+          if-no-files-found: error
+          retention-days: 3
+  capture2:
+    needs: plan
+    if: ${{ needs.plan.outputs.item_count != '0' }}
+    strategy: {fail-fast: false, max-parallel: 4, matrix: "${{ fromJson(needs.plan.outputs.m2) }}"}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env: *cap_env
+    steps: *cap_steps
+  capture3:
+    needs: plan
+    if: ${{ needs.plan.outputs.item_count != '0' }}
+    strategy: {fail-fast: false, max-parallel: 4, matrix: "${{ fromJson(needs.plan.outputs.m3) }}"}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env: *cap_env
+    steps: *cap_steps
+  capture4:
+    needs: plan
+    if: ${{ needs.plan.outputs.item_count != '0' }}
+    strategy: {fail-fast: false, max-parallel: 4, matrix: "${{ fromJson(needs.plan.outputs.m4) }}"}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env: *cap_env
+    steps: *cap_steps
+  capture5:
+    needs: plan
+    if: ${{ needs.plan.outputs.item_count != '0' }}
+    strategy: {fail-fast: false, max-parallel: 4, matrix: "${{ fromJson(needs.plan.outputs.m5) }}"}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env: *cap_env
+    steps: *cap_steps
