@@ -1,0 +1,24 @@
+name: P2-C cancel superseded exploratory backfills
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/p2c_cancel_superseded_exploratory_backfills.yml
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  cancel:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Cancel non-formal exploratory runs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          for run in 34687187420 34687211836 34687908128 34688037549; do
+            gh api -X POST repos/${{ github.repository }}/actions/runs/$run/cancel || true
+          done
