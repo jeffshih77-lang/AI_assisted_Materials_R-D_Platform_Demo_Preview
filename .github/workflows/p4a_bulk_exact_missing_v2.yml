@@ -1,0 +1,99 @@
+name: P4-A bulk exact missing capture v2
+on:
+  push:
+    paths:
+      - '.github/workflows/p4a_bulk_exact_missing_v2.yml'
+  workflow_dispatch:
+permissions:
+  actions: read
+  contents: read
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      missing_pages: ${{ steps.plan.outputs.missing_pages }}
+      item_count: ${{ steps.plan.outputs.item_count }}
+    steps:
+      - id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          gh api "repos/$REPO/actions/artifacts?per_page=100" --paginate --slurp > artifacts-pages.json
+          python - <<'PY'
+          import json,re,os
+          pc={81:{'L':1},82:{'L':17},83:{'L':23},84:{'L':28},85:{'L':51,'O':4},86:{'L':83,'O':10},87:{'L':120,'O':20},88:{'L':179,'O':34},89:{'L':225,'O':44},90:{'L':262,'O':72},91:{'L':365,'O':78},92:{'L':308,'O':77},93:{'L':298,'O':102},94:{'L':262,'O':109},95:{'L':214,'O':106},96:{'L':234,'O':118},97:{'L':258,'O':133},98:{'L':247,'O':127},99:{'L':271,'O':143},100:{'L':302,'O':153},101:{'L':275,'O':145},102:{'L':294,'O':160},103:{'L':296,'O':164},104:{'L':308,'O':175},105:{'L':305,'O':178},106:{'L':314,'O':175},107:{'L':328,'O':185},108:{'L':337,'O':191},109:{'L':358,'O':220},110:{'L':410,'O':249},111:{'L':381,'O':234},112:{'L':372,'O':236},113:{'L':425,'O':267},114:{'L':459,'O':287},115:{'L':371,'O':233}}
+          cov={(y,k):set() for y,ks in pc.items() for k in ks}
+          cov[(85,'O')].update(range(4)); cov[(115,'L')].update(range(16))
+          pats=[re.compile(x) for x in [r'^p4a-material-info-ROC(\d+)-([LO])-P0*(\d+)-0*(\d+)-v4$',r'^p4a-repair-ROC(\d+)-([LO])-P(\d+)-(\d+)-v4$',r'^p4a-auto-repair-ROC(\d+)-([LO])-P(\d+)-(\d+)$',r'^p4a-microrepair-ROC(\d+)-([LO])-P(\d+)-(\d+)$',r'^p4a-auto-microrepair-ROC(\d+)-([LO])-P(\d+)-(\d+)$',r'^p4a-final-ROC(\d+)-([LO])-P(\d+)$',r'^p4a-targeted-final-ROC(\d+)-([LO])-P(\d+)$',r'^p4a-gap-ROC(\d+)-([LO])-P(\d+)-(\d+)$']]
+          arts=[]
+          for obj in json.load(open('artifacts-pages.json')): arts += obj.get('artifacts',[])
+          for a in arts:
+            if a.get('expired'): continue
+            n=a.get('name','')
+            if n=='p4a-material-info-ROC115-L-p0014-p0015-public-runner-v4': y,k,s,e=115,'L',14,15
+            else:
+              m=next((p.match(n) for p in pats if p.match(n)),None)
+              if not m: continue
+              g=m.groups(); y=int(g[0]); k=g[1]; s=int(g[2]); e=int(g[3]) if len(g)>3 else s
+            if (y,k) in cov and 0<=s<=e<pc[y][k]: cov[(y,k)].update(range(s,e+1))
+          items=[]; missing_pages=0
+          for y,ks in pc.items():
+            for k,count in ks.items():
+              miss=sorted(set(range(count))-cov[(y,k)]); missing_pages += len(miss)
+              if not miss: continue
+              runs=[]; st=pr=miss[0]
+              for p in miss[1:]:
+                if p==pr+1: pr=p
+                else: runs.append((st,pr)); st=pr=p
+              runs.append((st,pr))
+              for s,e in runs:
+                p=s
+                while p<=e:
+                  q=min(e,p+49); items.append({'roc':y,'kind':k,'start':p,'end':q}); p=q+1
+          if len(items)>256: raise SystemExit(f'matrix too large: {len(items)}')
+          matrix=json.dumps({'include':items},separators=(',',':'))
+          print('missing_pages',missing_pages,'work_items',len(items)); print(matrix)
+          with open(os.environ['GITHUB_OUTPUT'],'a') as f:
+            f.write('matrix='+matrix+'\n'); f.write('missing_pages='+str(missing_pages)+'\n'); f.write('item_count='+str(len(items))+'\n')
+          PY
+  capture:
+    needs: plan
+    if: ${{ needs.plan.outputs.item_count != '0' }}
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix: ${{ fromJson(needs.plan.outputs.matrix) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      ROC_YEAR: ${{ matrix.roc }}
+      KIND: ${{ matrix.kind }}
+      START_PAGE: ${{ matrix.start }}
+      END_PAGE: ${{ matrix.end }}
+      DETAIL_WORKERS: '4'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - name: Capture exact missing pages only
+        run: |
+          cp p4a_runner/p4a_material_info_page_chunk_v4.py /tmp/p4a_collector.py
+          sed -i 's/def get(url, retries=3):/def get(url, retries=20):/' /tmp/p4a_collector.py
+          python /tmp/p4a_collector.py
+      - name: Package immutable RAW
+        run: |
+          python - <<'PY'
+          import pathlib,zipfile
+          root=next(pathlib.Path('out_p4a_chunk').iterdir()); out=pathlib.Path(root.name+'.zip')
+          with zipfile.ZipFile(out,'w',zipfile.ZIP_DEFLATED) as z:
+            for p in sorted(root.rglob('*')):
+              if p.is_file(): z.write(p,p.relative_to(root.parent))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: p4a-gap-ROC${{ matrix.roc }}-${{ matrix.kind }}-P${{ matrix.start }}-${{ matrix.end }}
+          path: P4A-MATERIAL-ROC${{ matrix.roc }}-${{ matrix.kind }}-P*.zip
+          if-no-files-found: error
+          retention-days: 2
