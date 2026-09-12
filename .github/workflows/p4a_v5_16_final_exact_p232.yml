@@ -1,0 +1,68 @@
+name: P4-A V5.16 final exact residual ROC115 L p232
+on:
+  push:
+    paths:
+      - '.github/workflows/p4a_v5_16_final_exact_p232.yml'
+permissions:
+  contents: read
+jobs:
+  exact_p232:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      ROC_YEAR: '115'
+      KIND: 'L'
+      START_PAGE: '232'
+      END_PAGE: '232'
+      DETAIL_WORKERS: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - name: Guard current authoritative missing whitelist
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          p=json.load(open('p4a_runner/P4A_FORMAL_MISSING_LIVE.json'))
+          missing={(int(r['roc']),r['kind'],x) for r in p['exact_missing_ranges'] for x in range(int(r['start']),int(r['end'])+1)}
+          assert (115,'L',232) in missing
+          assert p['authoritative_audit_drive_id']=='1M8lSuMKu-rr9Xw-tdaR4zLHTH9SQ9R6x'
+          print({'guard':'PASS','page':[115,'L',232],'formal_missing_pages':len(missing)})
+          PY
+      - name: Capture exact single page
+        shell: bash
+        run: |
+          cp p4a_runner/p4a_material_info_page_chunk_v4.py /tmp/p4a.py
+          sed -i 's/def get(url, retries=3):/def get(url, retries=20):/' /tmp/p4a.py
+          python /tmp/p4a.py
+      - name: Validate immutable V4 RAW
+        shell: bash
+        run: |
+          python - <<'PY'
+          import pathlib,json,zipfile,os,hashlib,posixpath
+          roots=[p for p in pathlib.Path('out_p4a_chunk').iterdir() if p.is_dir()];assert len(roots)==1
+          root=roots[0];mans=list(root.rglob('MANIFEST.json'));assert len(mans)==1
+          m=json.loads(mans[0].read_text(encoding='utf-8-sig'));c=m['coverage'];a=m['assertions'];caps=m.get('captures',[]);anos=m.get('anomalies',[])
+          assert m['schema']=='p4a_material_info_page_chunk_v4'
+          assert (int(c['roc_year']),c['kind'],int(c['start_page']),int(c['end_page']))==(115,'L',232,232)
+          assert int(a['page_count'])==1 and int(a['list_capture_count'])==1
+          assert a['all_http_200'] is True and a['all_payload_nonempty'] is True
+          assert all(x.get('http_status')==200 and int(x.get('payload_bytes',0))>0 for x in caps)
+          assert int(a['nonstandard_detail_count'])==len(anos)
+          assert all(x.get('disposition')=='PRESERVE_RAW_DO_NOT_ZERO_FILL' for x in anos)
+          for cap in caps:
+            for pf,hf in [('raw_path','payload_sha256'),('gzip_path','gzip_sha256')]:
+              q=root/cap[pf];assert q.is_file();b=q.read_bytes();assert len(b)>0 and hashlib.sha256(b).hexdigest()==cap[hf]
+          out=pathlib.Path(root.name+'.zip')
+          with zipfile.ZipFile(out,'w',zipfile.ZIP_DEFLATED) as z:
+            for p in sorted(root.rglob('*')):
+              if p.is_file():z.write(p,p.relative_to(root.parent))
+          print({'manifest':'PASS','detail_capture_count':a['detail_capture_count'],'provider_marker_detail_count':a['provider_marker_detail_count'],'nonstandard_detail_count':a['nonstandard_detail_count'],'zip':out.name,'zip_sha256':hashlib.sha256(out.read_bytes()).hexdigest(),'zip_size':out.stat().st_size})
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: p4a-v5-16-final-ROC115-L-P232
+          path: P4A-MATERIAL-ROC115-L-P0232-0232.zip
+          if-no-files-found: error
+          retention-days: 3
