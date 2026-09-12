@@ -1,0 +1,63 @@
+name: W08 T05ST09 formal RAW v2
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/w08_t05st09_formal_raw_v2.yml
+
+permissions:
+  contents: read
+
+jobs:
+  capture:
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        chunk: [0,1,2,3,4,5,6,7]
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    env:
+      CHUNK_INDEX: ${{ matrix.chunk }}
+      CHUNK_COUNT: 8
+    steps:
+      - uses: actions/checkout@v4
+      - name: Restore and verify frozen 2436-code universe
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import base64,gzip,hashlib,json,pathlib
+          b64=pathlib.Path('w08_public_runner/w08_all_codes_2436_v2.txt.gz.b64').read_text().strip()
+          raw=gzip.decompress(base64.b64decode(b64))
+          assert hashlib.sha256(raw).hexdigest()=='24eb2336ea71fcec65747ffc7856974528474919f8971b452f08ccd3eb983bd2'
+          codes=[x for x in raw.decode().splitlines() if x]
+          assert len(codes)==2436 and len(set(codes))==2436 and codes==sorted(codes)
+          p=pathlib.Path('w08_public_runner/w08_company_code_universe_v1.json')
+          d=json.loads(p.read_text())
+          pre=d['pre_20050505_codes']
+          pre_raw=('\n'.join(pre)+'\n').encode()
+          assert len(pre)==1281 and hashlib.sha256(pre_raw).hexdigest()=='2fc67794c6e8c94f8eabbecbd4efcf0ef4214261715a5860d51ae6f7555590dc'
+          d['all_numeric_4digit_codes']=codes
+          d['counts']={'all':2436,'pre':1281}
+          p.write_text(json.dumps(d,ensure_ascii=False,separators=(',',':'))+'\n')
+          print('universe gate PASS all=2436 pre=1281')
+          PY
+      - name: Capture exact-byte T05ST09 chunk
+        run: python3 w08_public_runner/w08_t05st09_formal_raw_chunk_v1.py
+      - name: Summarize
+        if: always()
+        shell: bash
+        run: |
+          d=$(printf 'out_t05st09_chunk_%02d_of_08' "$CHUNK_INDEX")
+          [ -d "$d" ] && du -sh "$d" || true
+          [ -f "$d/RUN_STATE.json" ] && cat "$d/RUN_STATE.json" || true
+          [ -f "$d/MANIFEST.json" ] && sha256sum "$d/MANIFEST.json" || true
+      - name: Upload exact-byte chunk
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: w08-t05st09-formal-raw-chunk-${{ matrix.chunk }}-of-8-v2
+          path: out_t05st09_chunk_*/
+          if-no-files-found: error
+          retention-days: 7
