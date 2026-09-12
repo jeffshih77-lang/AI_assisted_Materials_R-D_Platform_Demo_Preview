@@ -1,0 +1,80 @@
+name: P2B MOPS financial endpoint diagnostic
+
+on:
+  push:
+    branches:
+      - p2b-financial-transport-20260912
+    paths:
+      - .github/workflows/p2b_mops_diagnostic.yml
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Probe official MOPS hosts and session behavior
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import http.cookiejar, json, pathlib, urllib.parse, urllib.request, urllib.error, hashlib, datetime as dt, re, time
+          OUT=pathlib.Path('diag'); OUT.mkdir(exist_ok=True)
+          hosts=['mops.twse.com.tw','mopsov.twse.com.tw']
+          samples=[('sii',102,1),('sii',115,2),('otc',115,2)]
+          ua='Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/140 Safari/537.36'
+          results=[]
+          def sha(b): return hashlib.sha256(b).hexdigest()
+          def save(tag,b):
+            p=OUT/(tag+'.bin'); p.write_bytes(b); return str(p)
+          def text(b):
+            for e in ('utf-8-sig','utf-8','cp950','big5'):
+              try:return b.decode(e),e
+              except:pass
+            return b.decode('utf-8','replace'),'replace'
+          def do(opener,req):
+            try:
+              with opener.open(req,timeout=60) as r:
+                return r.status,r.read(),dict(r.headers.items()),r.geturl(),None
+            except urllib.error.HTTPError as e:
+              return e.code,e.read(),dict(e.headers.items()) if e.headers else {},req.full_url,repr(e)
+            except Exception as e:
+              return None,b'',{},req.full_url,repr(e)
+          for host in hosts:
+            cj=http.cookiejar.CookieJar(); opener=urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cj))
+            for landing in ['https://'+host+'/mops/web/t163sb04','https://'+host+'/mops/web/index']:
+              req=urllib.request.Request(landing,headers={'User-Agent':ua,'Accept':'text/html,*/*'})
+              st,b,h,u,err=do(opener,req); tx,enc=text(b)
+              tag=re.sub(r'[^A-Za-z0-9]+','_',host+'_'+landing.split('/')[-1]+'_GET')
+              save(tag,b)
+              results.append({'host':host,'phase':'GET','url':landing,'status':st,'bytes':len(b),'sha256':sha(b) if b else None,'encoding':enc,'cookies':[{'name':c.name,'value':c.value,'domain':c.domain,'path':c.path} for c in cj],'title':re.findall(r'<title[^>]*>(.*?)</title>',tx,re.I|re.S)[:1],'contains_company_code':'公司代號' in tx,'contains_captcha':('驗證碼' in tx or 'captcha' in tx.lower()),'body_file':tag+'.bin','error':err})
+              time.sleep(.2)
+            for typ,yr,season in samples:
+              variants=[
+                {'encodeURIComponent':'1','step':'1','firstin':'1','off':'1','isQuery':'Y','TYPEK':typ,'year':str(yr),'season':f'{season:02d}'},
+                {'encodeURIComponent':'1','step':'1','firstin':'1','off':'1','TYPEK':typ,'year':str(yr),'season':f'{season:02d}'},
+                {'step':'1','firstin':'1','off':'1','isQuery':'Y','TYPEK':typ,'year':str(yr),'season':f'{season:02d}'},
+              ]
+              for vi,form in enumerate(variants,1):
+                url='https://'+host+'/mops/web/ajax_t163sb04'
+                data=urllib.parse.urlencode(form).encode()
+                req=urllib.request.Request(url,data=data,method='POST',headers={'User-Agent':ua,'Accept':'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8','Content-Type':'application/x-www-form-urlencoded; charset=UTF-8','Referer':'https://'+host+'/mops/web/t163sb04','Origin':'https://'+host,'X-Requested-With':'XMLHttpRequest'})
+                st,b,h,u,err=do(opener,req); tx,enc=text(b)
+                tag=f'{host}_{typ}_{yr}Q{season}_v{vi}'.replace('.','_')
+                save(tag,b)
+                results.append({'host':host,'phase':'POST','variant':vi,'market':typ,'year':yr,'season':season,'url':url,'form':form,'status':st,'bytes':len(b),'sha256':sha(b) if b else None,'encoding':enc,'cookies':[{'name':c.name,'value':c.value,'domain':c.domain,'path':c.path} for c in cj],'contains_company_code':'公司代號' in tx,'contains_eps':('基本每股盈餘' in tx or '每股盈餘' in tx),'contains_no_data':any(x in re.sub(r'\s+','',tx) for x in ['查無資料','無符合條件之資料','沒有資料','無資料']),'contains_captcha':('驗證碼' in tx or 'captcha' in tx.lower()),'head_text':re.sub(r'\s+',' ',re.sub(r'<[^>]+>',' ',tx))[:600],'body_file':tag+'.bin','error':err})
+                time.sleep(.2)
+          (OUT/'diagnostic.json').write_text(json.dumps(results,ensure_ascii=False,indent=2),encoding='utf-8')
+          for r in results:
+            if r['phase']=='POST': print(json.dumps({k:r.get(k) for k in ['host','market','year','season','variant','status','bytes','contains_company_code','contains_eps','contains_no_data','contains_captcha','head_text']},ensure_ascii=False))
+          PY
+      - name: Upload diagnostic artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: P2B_MOPS_DIAGNOSTIC_20260912
+          path: diag/
+          if-no-files-found: error
+          retention-days: 3
