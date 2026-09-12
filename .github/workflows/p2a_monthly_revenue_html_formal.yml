@@ -1,0 +1,157 @@
+name: P2A full official MOPS HTML monthly revenue RAW
+
+on:
+  push:
+    branches: [p2a-transport-20260912]
+    paths: [.github/workflows/p2a_monthly_revenue_html_formal.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  capture-html-history:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Capture exact official MOPS HTML bytes
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import datetime as dt, hashlib, html as htmlmod, json, pathlib, re, time, urllib.error, urllib.request, zipfile
+
+          OUT=pathlib.Path('out'); RAW=OUT/'raw'; META=OUT/'metadata'; CTRL=OUT/'control'
+          for p in (RAW,META,CTRL): p.mkdir(parents=True,exist_ok=True)
+          MARKETS={'TWSE':'sii','TPEX':'otc'}
+          START=(89,1); END=(115,8)
+          UA='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36'
+          BASE='https://mopsov.twse.com.tw/nas/t21/{code}/t21sc03_{roc}_{month}_{variant}.html'
+
+          def sha(b): return hashlib.sha256(b).hexdigest()
+          def months(a,b):
+            y,m=a
+            while (y,m)<=b:
+              yield y,m
+              m+=1
+              if m==13:y+=1;m=1
+          def decode_big5(b):
+            for enc in ('big5','cp950'):
+              try:return b.decode(enc),enc
+              except UnicodeDecodeError:pass
+            raise ValueError('invalid big5/cp950 HTML')
+          def cell_text(x):
+            return htmlmod.unescape(re.sub(r'<[^>]*>','',x)).replace('\xa0',' ').strip()
+          def validate(b, roc, month):
+            if len(b)<=1024: return False,None,0,'RESPONSE_TOO_SHORT'
+            try:text,enc=decode_big5(b)
+            except Exception:return False,None,0,'DECODE_FAIL'
+            if '營業收入統計表' not in text:return False,enc,0,'TITLE_MARKER_MISSING'
+            rows=0
+            for rm in re.finditer(r'<tr\b[^>]*>([\s\S]*?)</tr>',text,re.I):
+              cells=[cell_text(x) for x in re.findall(r'<td\b[^>]*>([\s\S]*?)</td>',rm.group(1),re.I)]
+              if re.fullmatch(r'\d{4}', cells[0] if cells else ''):
+                if len(cells)!=11:return False,enc,rows,'DATA_ROW_COLUMN_COUNT_'+str(len(cells))
+                rows+=1
+            if rows==0:return False,enc,0,'ZERO_DATA_ROWS'
+            return True,enc,rows,'DATA'
+          def fetch(url,tries=4):
+            last=None
+            for i in range(tries):
+              at=dt.datetime.now(dt.timezone.utc).isoformat().replace('+00:00','Z')
+              try:
+                req=urllib.request.Request(url,headers={'User-Agent':UA,'Referer':'https://mopsov.twse.com.tw/','Accept':'text/html,*/*'})
+                with urllib.request.urlopen(req,timeout=60) as r:
+                  body=r.read(); st=getattr(r,'status',200); headers=dict(r.headers.items()); final=r.geturl()
+                return {'ok':True,'status':st,'body':body,'headers':headers,'final_url':final,'retrieved_at':at}
+              except urllib.error.HTTPError as e:
+                body=e.read() if hasattr(e,'read') else b''
+                headers=dict(e.headers.items()) if e.headers else {}
+                if e.code in (404,410):return {'ok':True,'status':e.code,'body':body,'headers':headers,'final_url':url,'retrieved_at':at}
+                last='HTTPError '+str(e.code)
+              except Exception as e:last=repr(e)
+              if i<tries-1:time.sleep(min(5,1.5**i))
+            return {'ok':False,'status':None,'body':b'','headers':{},'final_url':url,'retrieved_at':at,'error':last}
+
+          # Qualification before capture: early boundary vicinity, schema-era samples, recent/latest/unpublished.
+          samples=[(89,12),(90,5),(90,6),(90,7),(91,8),(102,1),(110,6),(114,6),(115,8),(115,9)]
+          qualification=[]
+          for market,code in MARKETS.items():
+            for roc,month in samples:
+              for variant in (0,1):
+                url=BASE.format(code=code,roc=roc,month=month,variant=variant); r=fetch(url)
+                if r['ok'] and r['status']==200: valid,enc,row_count,kind=validate(r['body'],roc,month)
+                else: valid,enc,row_count,kind=False,None,0,('NO_DATA_HTTP' if r['status'] in (404,410) else 'TRANSPORT_ERROR')
+                qualification.append({'market':market,'roc_year':roc,'month':month,'variant':variant,'url':url,'transport_ok':r['ok'],'http_status':r['status'],'bytes':len(r['body']),'sha256':sha(r['body']) if r['body'] else None,'valid':valid,'encoding':enc,'rows':row_count,'classification':kind,'error':r.get('error')})
+                time.sleep(.05)
+
+          # Repeatability latest domestic file per market.
+          repeatability=[]
+          for market,code in MARKETS.items():
+            url=BASE.format(code=code,roc=115,month=8,variant=0); a=fetch(url);time.sleep(.25);b=fetch(url)
+            repeatability.append({'market':market,'url':url,'first_status':a['status'],'second_status':b['status'],'first_sha256':sha(a['body']) if a['body'] else None,'second_sha256':sha(b['body']) if b['body'] else None,'identical':bool(a['body']) and a['body']==b['body']})
+            va=validate(a['body'],115,8)[0] if a['status']==200 else False
+            if not va or not repeatability[-1]['identical']:raise SystemExit('HTML_QUALIFICATION_FAIL '+market+' '+json.dumps(repeatability[-1]))
+
+          captures=[]; anomalies=[]; month_members={}
+          for market,code in MARKETS.items():
+            for roc,month in months(START,END):
+              valid_this=[]
+              for variant in (0,1):
+                url=BASE.format(code=code,roc=roc,month=month,variant=variant); r=fetch(url)
+                if not r['ok']:
+                  anomalies.append({'market':market,'roc_year':roc,'month':month,'variant':variant,'url':url,'classification':'TRANSPORT_ERROR','error':r.get('error')});continue
+                if r['status']!=200:
+                  anomalies.append({'market':market,'roc_year':roc,'month':month,'variant':variant,'url':url,'http_status':r['status'],'classification':'NO_DATA_HTTP'});continue
+                valid,enc,row_count,kind=validate(r['body'],roc,month)
+                item={'market':market,'roc_year':roc,'month':month,'variant':variant,'url':url,'http_status':r['status'],'bytes':len(r['body']),'sha256':sha(r['body']) if r['body'] else None,'retrieved_at':r['retrieved_at'],'encoding':enc,'rows':row_count,'classification':kind}
+                if not valid:
+                  anomalies.append(item);continue
+                rd=RAW/market;md=META/market;rd.mkdir(parents=True,exist_ok=True);md.mkdir(parents=True,exist_ok=True)
+                rp=rd/f'{roc:03d}_{month:02d}_{variant}.response.html';mp=md/f'{roc:03d}_{month:02d}_{variant}.capture.json'
+                rp.write_bytes(r['body'])
+                meta={'schema':'p2a_exact_http_capture_v1','dataset':'MONTHLY_REVENUE','work_unit_id':f'P2A-{market}-{roc:03d}-{month:02d}','market':market,'variant':variant,'source_family':'MOPSOV_T21_MONTHLY_REVENUE_LEGACY_HTML','schema_family':'MOPS_T21_LEGACY_HTML_11COL','method':'GET','request_url':url,'final_url':r['final_url'],'retrieved_at':r['retrieved_at'],'published_at':'unknown','available_at':'unknown','http_status':r['status'],'response_headers':r['headers'],'payload_bytes':len(r['body']),'payload_sha256':sha(r['body']),'encoding_detected':enc,'data_rows':row_count,'raw_semantics':'exact HTTP response body bytes','classification':'FORMAL_RAW_CANDIDATE_PENDING_DRIVE_READBACK'}
+                mp.write_text(json.dumps(meta,ensure_ascii=False,indent=2,sort_keys=True)+'\n',encoding='utf-8')
+                item.update({'raw_path':str(rp.relative_to(OUT)),'metadata_path':str(mp.relative_to(OUT))});captures.append(item);valid_this.append(item)
+                time.sleep(.05)
+              if valid_this: month_members[(market,roc,month)]=valid_this
+
+          coverage={}; ledger=[]
+          for market in MARKETS:
+            vals=sorted((y,m) for (mk,y,m) in month_members if mk==market)
+            if not vals:raise SystemExit('NO_VALID_HTML_DATA '+market)
+            first,last=vals[0],vals[-1]; expected=list(months(first,END)); missing=[p for p in expected if (market,p[0],p[1]) not in month_members]
+            coverage[market]={'first_valid':f'{first[0]:03d}-{first[1]:02d}','last_valid':f'{last[0]:03d}-{last[1]:02d}','valid_months':len(vals),'missing_within_boundary':[f'{y:03d}-{m:02d}' for y,m in missing]}
+            if last!=END or missing:raise SystemExit('HTML_COVERAGE_GAP '+market+' '+json.dumps(coverage[market]))
+            for y,m in expected:
+              members=month_members[(market,y,m)]
+              ledger.append({'work_unit_id':f'P2A-{market}-{y:03d}-{m:02d}','market':market,'roc_year':y,'month':m,'status':'RAW_CAPTURED_PENDING_CLOUD_VERIFY','source_family':'MOPSOV_T21_MONTHLY_REVENUE_LEGACY_HTML','raw_members':[{'variant':x['variant'],'payload_bytes':x['bytes'],'payload_sha256':x['sha256'],'source_url':x['url'],'raw_path':x['raw_path'],'metadata_path':x['metadata_path'],'rows':x['rows']} for x in members]})
+
+          contract={'schema':'p2a_source_contract_v1','version':'P2-A-SOURCE-CONTRACT-v1','dataset':'MONTHLY_REVENUE','status':'FROZEN','source_families':['MOPSOV_T21_MONTHLY_REVENUE_LEGACY_HTML','MOPSOV_T21_MONTHLY_REVENUE_ARCHIVE_CSV_RECENT'],'official_host':'mopsov.twse.com.tw','historical_request_pattern':'https://mopsov.twse.com.tw/nas/t21/{sii|otc}/t21sc03_{ROC_YEAR}_{MONTH}_{0|1}.html','recent_csv_pattern':'https://mopsov.twse.com.tw/nas/t21/{sii|otc}/t21sc03_{ROC_YEAR}_{MONTH}.csv','market_mapping':MARKETS,'work_unit':'market x month','raw_preservation':'exact HTTP response body bytes + request/response metadata; no transcode/merge','validation':'legacy HTML >1024 bytes + Big5 decode + title 營業收入統計表 + >=1 valid 11-column company row; a market-month is covered when >=1 official variant contains data','available_at':'unknown unless independently provable','published_at':'unknown unless independently provable','latest_complete_month_qualified':'ROC115-08 / 2026-08','historical_source_boundary':coverage,'immutable_raw':True}
+          qdoc={'schema':'p2a_source_qualification_v1','status':'PASS','samples':qualification,'repeatability':repeatability,'contract_version':'P2-A-SOURCE-CONTRACT-v1','notes':['Historical CSV route is not assumed for old periods; legacy official HTML variants are preserved byte-for-byte.','ROC115-09 is outside target because latest complete published month is ROC115-08.']}
+          manifest={'schema':'p2a_manifest_v1','dataset':'MONTHLY_REVENUE','claimant_id':'P2-A-CHAT-20260912-1733','source_contract_version':'P2-A-SOURCE-CONTRACT-v1','generated_at':dt.datetime.now(dt.timezone.utc).isoformat().replace('+00:00','Z'),'coverage':coverage,'work_units':len(ledger),'raw_payload_files':len(captures),'payload_bytes':sum(x['bytes'] for x in captures),'members':ledger}
+          controls={
+            'P2A_SOURCE_CONTRACT.json':contract,
+            'P2A_SOURCE_QUALIFICATION.json':qdoc,
+            'P2A_WORK_UNIT_LEDGER.json':{'schema':'p2a_work_unit_ledger_v1','work_units':ledger},
+            'P2A_COVERAGE.json':{'schema':'p2a_coverage_v1','dataset':'MONTHLY_REVENUE','coverage':coverage,'latest_complete_gregorian':'2026-08','status':'HISTORICAL_BASE_CAPTURED_WITH_SOURCE_BOUNDARY_PENDING_CLOUD_VERIFY'},
+            'P2A_ANOMALY_LEDGER.json':{'schema':'p2a_anomaly_ledger_v1','scan_range':{'start':'089-01','end':'115-08'},'source_boundaries':coverage,'pre_boundary_or_variant_no_data':anomalies,'unclassified_true_gaps':[]},
+            'P2A_MANIFEST.json':manifest,
+          }
+          for name,obj in controls.items():(CTRL/name).write_text(json.dumps(obj,ensure_ascii=False,indent=2,sort_keys=True)+'\n',encoding='utf-8')
+          package=OUT/'P2A_MONTHLY_REVENUE_FORMAL_RAW_HTML_20260912.zip'
+          files=sorted(p for root in (RAW,META,CTRL) for p in root.rglob('*') if p.is_file())
+          with zipfile.ZipFile(package,'w',compression=zipfile.ZIP_DEFLATED,compresslevel=9) as z:
+            for p in files:z.write(p,p.relative_to(OUT).as_posix())
+          psha=sha(package.read_bytes())
+          info={'schema':'p2a_package_info_v1','file_name':package.name,'bytes':package.stat().st_size,'sha256':psha,'member_count':len(files),'raw_payload_files':len(captures),'work_units':len(ledger),'formal_status':'PENDING_DRIVE_UPLOAD_AND_READBACK'}
+          (OUT/'P2A_PACKAGE_INFO.json').write_text(json.dumps(info,ensure_ascii=False,indent=2,sort_keys=True)+'\n',encoding='utf-8')
+          (OUT/'SHA256SUMS.txt').write_text(f'{psha}  {package.name}\n',encoding='utf-8')
+          print(json.dumps({'qualification':'PASS','coverage':coverage,'work_units':len(ledger),'raw_payload_files':len(captures),'payload_bytes':manifest['payload_bytes'],'package_sha256':psha},ensure_ascii=False))
+          PY
+      - name: Upload formal HTML RAW artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: P2A_MONTHLY_REVENUE_FORMAL_RAW_HTML_20260912
+          path: out/
+          if-no-files-found: error
+          retention-days: 7
