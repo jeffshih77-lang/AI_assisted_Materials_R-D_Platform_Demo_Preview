@@ -1,4 +1,4 @@
-name: W08 final reconcile v1
+name: W08 final reconcile v2
 on:
   push:
     branches: [w08-final-free-source-20260912]
@@ -24,12 +24,12 @@ jobs:
         with:
           ref: w08-final-free-source-20260912
       - name: Reconcile formal artifacts and repair exact missing units only
-        run: python3 w08_public_runner/w08_final_reconcile_v1.py
+        run: python3 w08_public_runner/w08_final_reconcile_v2.py
       - name: Upload deterministic final aggregate
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: w08-final-${{ matrix.mode }}-aggregate-v1
+          name: w08-final-${{ matrix.mode }}-aggregate-v2
           path: out_w08_final_${{ matrix.mode }}/
           if-no-files-found: error
           retention-days: 7
