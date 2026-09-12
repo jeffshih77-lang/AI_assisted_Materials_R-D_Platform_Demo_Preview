@@ -17,3 +17,4 @@ jobs:
           set -euo pipefail
           gh api -X POST "repos/$REPO/actions/runs/34684641055/cancel"
           echo cancelled 34684641055
+# retrigger 2026-09-12 attempt2 cleanup
