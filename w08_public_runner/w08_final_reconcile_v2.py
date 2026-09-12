@@ -1,4 +1,4 @@
-import base64, gzip, json, os, pathlib, subprocess
+import base64, gzip, json, os, pathlib, subprocess, urllib.request, urllib.error
 
 CORE_COMMIT='4c9f56784ab2df8ad347cbc23f61e8449d22a628'
 CORE_PATH='w08_public_runner/w08_final_reconcile_v1.py'
@@ -42,16 +42,33 @@ def load_checkpoint_keys(path):
 
 ns=load_core()
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
 def safe_download_artifact(artifact):
-    # GitHub's artifact endpoint redirects to a temporary Azure blob URL. curl deliberately
-    # drops the GitHub Authorization header on cross-host redirect, avoiding blob-side 401.
-    return subprocess.check_output([
-      'curl','--fail','--silent','--show-error','--location',
-      '-H',f"Authorization: Bearer {ns['TOKEN']}",
-      '-H','Accept: application/vnd.github+json',
-      '-H','X-GitHub-Api-Version: 2022-11-28',
-      artifact['archive_download_url']
-    ])
+    # First hop is GitHub API and requires bearer auth. The Location is a signed Azure/blob
+    # URL and MUST be fetched without GitHub Authorization. This manual two-hop avoids 401.
+    req=urllib.request.Request(artifact['archive_download_url'],headers={
+        'Authorization':f"Bearer {ns['TOKEN']}",
+        'Accept':'application/vnd.github+json',
+        'X-GitHub-Api-Version':'2022-11-28',
+        'User-Agent':'W08Finalizer/2.1'})
+    opener=urllib.request.build_opener(_NoRedirect)
+    location=None
+    try:
+        with opener.open(req,timeout=120) as r:
+            if r.status in (301,302,303,307,308): location=r.headers.get('Location')
+            else: return r.read()
+    except urllib.error.HTTPError as e:
+        if e.code not in (301,302,303,307,308): raise
+        location=e.headers.get('Location')
+    if not location: raise RuntimeError(f'artifact_redirect_missing {artifact.get("id")}')
+    req2=urllib.request.Request(location,headers={'User-Agent':'W08Finalizer/2.1'})
+    with urllib.request.urlopen(req2,timeout=180) as r2:
+        blob=r2.read()
+    if not blob: raise RuntimeError(f'artifact_empty {artifact.get("id")}')
+    return blob
 ns['download_artifact']=safe_download_artifact
 
 mode=os.environ.get('MODE','t05').strip().lower()
