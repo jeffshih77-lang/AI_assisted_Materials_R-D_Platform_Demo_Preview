@@ -1,0 +1,136 @@
+name: P2-C valuation formal RAW v2b 2016-2026
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/p2c_valuation_formal_raw_v2b_2016_2026.yml
+
+permissions:
+  contents: read
+
+jobs:
+  capture:
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        ym: [2016-01,2016-02,2016-03,2016-04,2016-05,2016-06,2016-07,2016-08,2016-09,2016-10,2016-11,2016-12,2017-01,2017-02,2017-03,2017-04,2017-05,2017-06,2017-07,2017-08,2017-09,2017-10,2017-11,2017-12,2018-01,2018-02,2018-03,2018-04,2018-05,2018-06,2018-07,2018-08,2018-09,2018-10,2018-11,2018-12,2019-01,2019-02,2019-03,2019-04,2019-05,2019-06,2019-07,2019-08,2019-09,2019-10,2019-11,2019-12,2020-01,2020-02,2020-03,2020-04,2020-05,2020-06,2020-07,2020-08,2020-09,2020-10,2020-11,2020-12,2021-01,2021-02,2021-03,2021-04,2021-05,2021-06,2021-07,2021-08,2021-09,2021-10,2021-11,2021-12,2022-01,2022-02,2022-03,2022-04,2022-05,2022-06,2022-07,2022-08,2022-09,2022-10,2022-11,2022-12,2023-01,2023-02,2023-03,2023-04,2023-05,2023-06,2023-07,2023-08,2023-09,2023-10,2023-11,2023-12,2024-01,2024-02,2024-03,2024-04,2024-05,2024-06,2024-07,2024-08,2024-09,2024-10,2024-11,2024-12,2025-01,2025-02,2025-03,2025-04,2025-05,2025-06,2025-07,2025-08,2025-09,2025-10,2025-11,2025-12,2026-01,2026-02,2026-03,2026-04,2026-05,2026-06,2026-07,2026-08,2026-09]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      YM: ${{ matrix.ym }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Capture exact entity-body bytes monthly
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import urllib.request, urllib.error, ssl, pathlib, hashlib, json, datetime, time, os, calendar, sys
+          ym=os.environ['YM']; year,month=map(int,ym.split('-'))
+          out=pathlib.Path(f'out_p2c_valuation_{year}{month:02d}')
+          tw=out/'raw'/'TWSE_BWIBBU'; tp=out/'raw'/'TPEX_PERATIO'; tw.mkdir(parents=True); tp.mkdir(parents=True)
+          UA='Mozilla/5.0 P2-C-FormalRAW/2.0'; ctx=ssl._create_unverified_context(); manifest=[]; anomalies=[]
+          start=datetime.date(year,month,1); end=datetime.date(year,month,calendar.monthrange(year,month)[1]); global_end=datetime.date(2026,9,11)
+          if end>global_end: end=global_end
+          def fetch(url,context=None):
+            last=None
+            for attempt in range(1,4):
+              req=urllib.request.Request(url,headers={'User-Agent':UA,'Accept':'*/*','Accept-Encoding':'identity','Connection':'close'})
+              try:
+                with urllib.request.urlopen(req,timeout=45,context=context) as r: return r.status,r.geturl(),r.read(),attempt,None
+              except urllib.error.HTTPError as e: return e.code,e.geturl(),e.read(),attempt,f'HTTPError:{e.code}'
+              except Exception as e: last=f'{type(e).__name__}:{e}'; time.sleep(0.5*attempt)
+            return None,url,b'',3,last
+          def ctw(b):
+            r={'kind':'UNPARSED','rows':None,'internal_date':None,'fields':None,'stat':None}
+            try:
+              j=json.loads(b.decode('utf-8-sig')); r['stat']=j.get('stat'); r['internal_date']=j.get('date'); r['fields']=j.get('fields'); d=j.get('data'); r['rows']=len(d) if isinstance(d,list) else 0
+              r['kind']='DATA' if r['stat']=='OK' and r['rows']>0 else ('NO_DATA' if r['rows']==0 else 'OTHER')
+            except Exception as e: r['parse_error']=f'{type(e).__name__}:{e}'
+            return r
+          def ctp(b):
+            r={'kind':'UNPARSED','rows':None,'internal_date':None,'fields':None,'stat':None}
+            try:
+              j=json.loads(b.decode('utf-8-sig')); r['stat']=j.get('stat'); r['internal_date']=j.get('date'); tabs=j.get('tables');
+              if isinstance(tabs,list) and tabs:
+                t=tabs[0]; r['fields']=t.get('fields'); r['rows']=t.get('totalCount');
+                if r['rows'] is None and isinstance(t.get('data'),list): r['rows']=len(t['data'])
+              else: r['rows']=0
+              r['kind']='DATA' if r['stat']=='ok' and isinstance(r['rows'],int) and r['rows']>0 else ('NO_DATA' if r['stat']=='ok' and r['rows']==0 else 'OTHER')
+            except Exception as e: r['parse_error']=f'{type(e).__name__}:{e}'
+            return r
+          d=start
+          while d<=end:
+            ymd=d.strftime('%Y%m%d')
+            u=f'https://www.twse.com.tw/exchangeReport/BWIBBU_d?response=json&date={ymd}&selectType=ALL'; s,f,b,a,e=fetch(u); (tw/f'{ymd}.json').write_bytes(b); c=ctw(b)
+            m={'source':'TWSE_BWIBBU','date':ymd,'url':u,'final_url':f,'status':s,'bytes':len(b),'sha256':hashlib.sha256(b).hexdigest(),'fetched_at_utc':datetime.datetime.now(datetime.timezone.utc).isoformat(),'attempt':a,'error':e,'tls_verified':True,**c}; manifest.append(m)
+            if s!=200 or e or c['kind'] not in ('DATA','NO_DATA') or (c['kind']=='DATA' and c['internal_date']!=ymd): anomalies.append(m)
+            time.sleep(0.15)
+            ds=f'{d.year-1911:03d}/{d.month:02d}/{d.day:02d}'; u=f'https://www.tpex.org.tw/web/stock/aftertrading/peratio_analysis/pera_result.php?l=zh-tw&o=json&d={ds}&c='; s,f,b,a,e=fetch(u,ctx); (tp/f'{ymd}.json').write_bytes(b); c=ctp(b)
+            m={'source':'TPEX_PERATIO','date':ymd,'url':u,'final_url':f,'status':s,'bytes':len(b),'sha256':hashlib.sha256(b).hexdigest(),'fetched_at_utc':datetime.datetime.now(datetime.timezone.utc).isoformat(),'attempt':a,'error':e,'tls_verified':False,'tls_exception':'SERVER_CHAIN_NOT_VERIFIABLE_ON_GHA_UBUNTU_20260912_QUALIFIED_WITH_RECORDED_UNVERIFIED_CONTEXT',**c}; manifest.append(m)
+            if s!=200 or e or c['kind'] not in ('DATA','NO_DATA') or (c['kind']=='DATA' and c['internal_date']!=ymd): anomalies.append(m)
+            time.sleep(0.15); d+=datetime.timedelta(days=1)
+          sig={}
+          for src in ['TWSE_BWIBBU','TPEX_PERATIO']:
+            x={}
+            for m in manifest:
+              if m['source']==src:
+                k=json.dumps(m.get('fields'),ensure_ascii=False,separators=(',',':')); x[k]=x.get(k,0)+1
+            sig[src]=x
+          summary={'ym':ym,'request_records':len(manifest),'twse':{'records':sum(x['source']=='TWSE_BWIBBU' for x in manifest),'data':sum(x['source']=='TWSE_BWIBBU' and x['kind']=='DATA' for x in manifest),'no_data':sum(x['source']=='TWSE_BWIBBU' and x['kind']=='NO_DATA' for x in manifest)},'tpex':{'records':sum(x['source']=='TPEX_PERATIO' for x in manifest),'data':sum(x['source']=='TPEX_PERATIO' and x['kind']=='DATA' for x in manifest),'no_data':sum(x['source']=='TPEX_PERATIO' and x['kind']=='NO_DATA' for x in manifest)},'anomaly_count':len(anomalies),'unique_field_signatures':sig}
+          (out/'MANIFEST.jsonl').write_text(''.join(json.dumps(x,ensure_ascii=False,sort_keys=True)+'\n' for x in manifest)); (out/'ANOMALIES.jsonl').write_text(''.join(json.dumps(x,ensure_ascii=False,sort_keys=True)+'\n' for x in anomalies)); (out/'SUMMARY.json').write_text(json.dumps(summary,ensure_ascii=False,sort_keys=True,indent=2)+'\n')
+          (out/'SHA256SUMS.txt').write_text(''.join(f'{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.relative_to(out)}\n' for p in sorted((out/'raw').rglob('*.json'))))
+          print(json.dumps(summary,ensure_ascii=False));
+          if anomalies: sys.exit(2)
+          PY
+      - name: Upload monthly RAW
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: p2c-valuation-month-${{ matrix.ym }}-v2
+          path: out_p2c_valuation_*/
+          if-no-files-found: error
+          retention-days: 7
+  aggregate:
+    needs: capture
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: p2c-valuation-month-*-v2
+          path: monthly
+          merge-multiple: true
+      - name: Validate and aggregate range
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import pathlib,json,sys
+          root=pathlib.Path('monthly'); outs=sorted(root.glob('out_p2c_valuation_*')); expected=129
+          summaries=[]; anomalies=[]; manifests=[]
+          for d in outs:
+            sp=d/'SUMMARY.json'
+            if not sp.exists(): anomalies.append({'type':'MISSING_SUMMARY','dir':str(d)}); continue
+            s=json.loads(sp.read_text()); summaries.append(s)
+            if s.get('anomaly_count')!=0: anomalies.append({'type':'MONTH_ANOMALY','ym':s.get('ym'),'count':s.get('anomaly_count')})
+            mp=d/'MANIFEST.jsonl'
+            if mp.exists(): manifests.extend(json.loads(x) for x in mp.read_text().splitlines() if x.strip())
+          if len(outs)!=expected: anomalies.append({'type':'MONTH_COUNT','expected':expected,'actual':len(outs)})
+          out=pathlib.Path('aggregate_p2c_valuation_2016_2026_v2'); out.mkdir()
+          (out/'MONTH_SUMMARIES.json').write_text(json.dumps(summaries,ensure_ascii=False,sort_keys=True,indent=2)+'\n'); (out/'MANIFEST.jsonl').write_text(''.join(json.dumps(x,ensure_ascii=False,sort_keys=True)+'\n' for x in manifests)); (out/'AGGREGATE_ANOMALIES.json').write_text(json.dumps(anomalies,ensure_ascii=False,sort_keys=True,indent=2)+'\n')
+          summary={'range':'2016-01..2026-09-11','months':len(outs),'manifest_records':len(manifests),'twse_data_days':sum(x['source']=='TWSE_BWIBBU' and x['kind']=='DATA' for x in manifests),'twse_no_data_days':sum(x['source']=='TWSE_BWIBBU' and x['kind']=='NO_DATA' for x in manifests),'tpex_data_days':sum(x['source']=='TPEX_PERATIO' and x['kind']=='DATA' for x in manifests),'tpex_no_data_days':sum(x['source']=='TPEX_PERATIO' and x['kind']=='NO_DATA' for x in manifests),'anomaly_count':len(anomalies)}
+          (out/'SUMMARY.json').write_text(json.dumps(summary,ensure_ascii=False,sort_keys=True,indent=2)+'\n'); (out/'MONTHLY_RAW_TREE.txt').write_text('\n'.join(str(p) for p in sorted(root.rglob('*')) if p.is_file())+'\n')
+          print(json.dumps(summary,ensure_ascii=False,indent=2));
+          if anomalies: sys.exit(2)
+          PY
+      - name: Upload aggregate index
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: p2c-valuation-aggregate-2016-2026-v2
+          path: aggregate_p2c_valuation_2016_2026_v2/
+          if-no-files-found: error
+          retention-days: 7
