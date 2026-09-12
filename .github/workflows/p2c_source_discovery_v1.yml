@@ -1,0 +1,103 @@
+name: P2-C source discovery v1
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/p2c_source_discovery_v1.yml
+
+permissions:
+  contents: read
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Discover TPEx legacy and MOPSfin official transports
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out_p2c_source_discovery_v1/tpex out_p2c_source_discovery_v1/mopsfin
+          # TPEx current page exact HTML, strict first then recorded -k fallback.
+          URL='https://www.tpex.org.tw/zh-tw/mainboard/trading/info/daily-pe.html'
+          curl -sS -L --connect-timeout 20 --max-time 60 -A 'Mozilla/5.0 P2-C-Discovery/1.0' -D out_p2c_source_discovery_v1/tpex/daily_pe.headers.txt -o out_p2c_source_discovery_v1/tpex/daily_pe.strict.html "$URL" 2>out_p2c_source_discovery_v1/tpex/daily_pe.strict.stderr.txt || true
+          if [ ! -s out_p2c_source_discovery_v1/tpex/daily_pe.strict.html ]; then
+            curl -k -sS -L --connect-timeout 20 --max-time 60 -A 'Mozilla/5.0 P2-C-Discovery/1.0' -D out_p2c_source_discovery_v1/tpex/daily_pe.headers.txt -o out_p2c_source_discovery_v1/tpex/daily_pe.html "$URL" 2>out_p2c_source_discovery_v1/tpex/daily_pe.insecure.stderr.txt || true
+          else
+            cp out_p2c_source_discovery_v1/tpex/daily_pe.strict.html out_p2c_source_discovery_v1/tpex/daily_pe.html
+          fi
+          python3 - <<'PY'
+          import pathlib,re,json,hashlib,urllib.parse
+          root=pathlib.Path('out_p2c_source_discovery_v1/tpex')
+          p=root/'daily_pe.html'; b=p.read_bytes() if p.exists() else b''
+          txt=b.decode('utf-8',errors='replace')
+          links=[]
+          for m in re.finditer(r'href=["\']([^"\']+)["\']',txt,re.I):
+            href=m.group(1)
+            s=max(0,m.start()-250); e=min(len(txt),m.end()+400)
+            ctx=re.sub(r'\s+',' ',txt[s:e])
+            if any(x in ctx for x in ['92年','95年','2003','2006','本益比','查詢']):
+              links.append({'href':href,'absolute':urllib.parse.urljoin('https://www.tpex.org.tw/zh-tw/mainboard/trading/info/daily-pe.html',href),'context':ctx})
+          (root/'legacy_link_candidates.json').write_text(json.dumps(links,ensure_ascii=False,indent=2)+'\n')
+          (root/'PAGE_META.json').write_text(json.dumps({'bytes':len(b),'sha256':hashlib.sha256(b).hexdigest(),'candidate_links':len(links)},ensure_ascii=False,indent=2)+'\n')
+          print('TPEx candidates',json.dumps(links,ensure_ascii=False,indent=2))
+          PY
+
+          # MOPSfin home + all local JS script assets; exact bytes retained for source-contract discovery.
+          MF='https://mopsfin.twse.com.tw/'
+          curl -sS -L --connect-timeout 20 --max-time 60 -A 'Mozilla/5.0 P2-C-Discovery/1.0' -D out_p2c_source_discovery_v1/mopsfin/home.headers.txt -o out_p2c_source_discovery_v1/mopsfin/home.html "$MF"
+          python3 - <<'PY'
+          import pathlib,re,urllib.parse,json
+          root=pathlib.Path('out_p2c_source_discovery_v1/mopsfin')
+          txt=(root/'home.html').read_text(errors='replace')
+          scripts=[]
+          for m in re.finditer(r'<script[^>]+src=["\']([^"\']+)["\']',txt,re.I):
+            u=urllib.parse.urljoin('https://mopsfin.twse.com.tw/',m.group(1))
+            if u.startswith('https://mopsfin.twse.com.tw/'):
+              scripts.append(u)
+          (root/'script_urls.json').write_text(json.dumps(sorted(set(scripts)),ensure_ascii=False,indent=2)+'\n')
+          print('\n'.join(sorted(set(scripts))))
+          PY
+          python3 - <<'PY'
+          import json,pathlib,subprocess,hashlib,re,urllib.parse
+          root=pathlib.Path('out_p2c_source_discovery_v1/mopsfin')
+          urls=json.loads((root/'script_urls.json').read_text())
+          assets=[]
+          for i,u in enumerate(urls):
+            name=f'asset_{i:03d}.js'
+            p=root/name
+            r=subprocess.run(['curl','-sS','-L','--connect-timeout','20','--max-time','60','-A','Mozilla/5.0 P2-C-Discovery/1.0','-o',str(p),u],capture_output=True,text=True)
+            b=p.read_bytes() if p.exists() else b''
+            assets.append({'url':u,'file':name,'rc':r.returncode,'bytes':len(b),'sha256':hashlib.sha256(b).hexdigest(),'stderr':r.stderr})
+          (root/'assets_manifest.json').write_text(json.dumps(assets,ensure_ascii=False,indent=2)+'\n')
+          pats=re.compile(r'[^"\'\s]{0,100}(?:/api/|ajax|fetch\(|axios|t187ap1[47]|財務|ratio|compare|quarter|season|year)[^"\'\s]{0,180}',re.I)
+          hits=[]
+          for a in assets:
+            p=root/a['file']
+            txt=p.read_text(errors='replace') if p.exists() else ''
+            for m in pats.finditer(txt):
+              s=re.sub(r'\s+',' ',m.group(0))
+              if len(s)>2: hits.append({'file':a['file'],'url':a['url'],'hit':s})
+          # Also search home HTML.
+          h=(root/'home.html').read_text(errors='replace')
+          for m in pats.finditer(h): hits.append({'file':'home.html','url':'https://mopsfin.twse.com.tw/','hit':re.sub(r'\s+',' ',m.group(0))})
+          # dedupe exact snippets, keep manageable but complete enough for contract discovery.
+          seen=set(); out=[]
+          for x in hits:
+            k=(x['file'],x['hit'])
+            if k not in seen:
+              seen.add(k); out.append(x)
+          (root/'endpoint_candidates.json').write_text(json.dumps(out,ensure_ascii=False,indent=2)+'\n')
+          for x in out[:500]: print('HIT',x)
+          PY
+          find out_p2c_source_discovery_v1 -type f -maxdepth 3 -print0 | sort -z | xargs -0 sha256sum > out_p2c_source_discovery_v1/SHA256SUMS.txt
+      - name: Upload discovery evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: p2c-source-discovery-v1
+          path: out_p2c_source_discovery_v1/
+          if-no-files-found: error
+          retention-days: 7
