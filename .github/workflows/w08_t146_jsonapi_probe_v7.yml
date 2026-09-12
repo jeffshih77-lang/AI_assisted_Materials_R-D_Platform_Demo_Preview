@@ -1,0 +1,89 @@
+name: W08 T146 JSON API historical probe v7
+on:
+  push:
+    branches: [w08-final-free-source-20260912]
+    paths:
+      - '.github/workflows/w08_t146_jsonapi_probe_v7.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Probe official MOPS JSON API and preserve exact bytes
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import urllib.request, urllib.error, json, pathlib, hashlib, gzip, time, datetime
+          OUT=pathlib.Path('out_t146_jsonapi_v7'); OUT.mkdir()
+          URL='https://mops.twse.com.tw/mops/api/t146sb10'
+          UA='Mozilla/5.0 (compatible; W08T146FormalProbe/7.0)'
+          def sha(b): return hashlib.sha256(b).hexdigest()
+          def request(case, body):
+              req_bytes=json.dumps(body,ensure_ascii=False,separators=(',',':')).encode('utf-8')
+              stem=case.replace('/','_').replace(':','_')
+              (OUT/f'{stem}.request.json').write_bytes(req_bytes)
+              req=urllib.request.Request(URL,data=req_bytes,method='POST',headers={'User-Agent':UA,'Accept':'application/json,*/*','Content-Type':'application/json','Origin':'https://mops.twse.com.tw','Referer':'https://mops.twse.com.tw/mops/#/web/t146sb10'})
+              last=None
+              for a in range(1,5):
+                  try:
+                      with urllib.request.urlopen(req,timeout=60) as r:
+                          raw=r.read(); status=r.status; headers=dict(r.headers); final=r.geturl()
+                      break
+                  except Exception as e:
+                      last=repr(e)
+                      if a==4: raise
+                      time.sleep(a*2)
+              (OUT/f'{stem}.response.bin').write_bytes(raw)
+              with gzip.GzipFile(filename='',mode='wb',fileobj=open(OUT/f'{stem}.response.bin.gz','wb'),mtime=0) as g: g.write(raw)
+              try: p=json.loads(raw)
+              except Exception: p={}
+              results=p.get('result') or []
+              table_count=len(results) if isinstance(results,list) else (1 if results else 0)
+              row_count=0; headers_seen=[]; dates=[]
+              if isinstance(results,list):
+                  for t in results:
+                      if isinstance(t,dict):
+                          headers_seen.append(t.get('header'))
+                          data=t.get('data') or []
+                          row_count += len(data) if isinstance(data,list) else 0
+                          titles=t.get('titles') or []
+                          idx=None
+                          for i,x in enumerate(titles):
+                              if isinstance(x,dict) and x.get('main')=='公告日期': idx=i
+                          if idx is not None and isinstance(data,list):
+                              for row in data:
+                                  if isinstance(row,list) and idx < len(row): dates.append(str(row[idx]))
+              meta={'case':case,'url':URL,'http_status':status,'final_url':final,'request_bytes':len(req_bytes),'request_sha256':sha(req_bytes),'response_bytes':len(raw),'response_sha256':sha(raw),'content_type':headers.get('Content-Type'),'api_code':p.get('code'),'api_message':p.get('message'),'result_table_count':table_count,'result_row_count':row_count,'result_headers':headers_seen,'min_announcement_date':min(dates) if dates else None,'max_announcement_date':max(dates) if dates else None,'retrieved_at':datetime.datetime.now(datetime.timezone.utc).isoformat()}
+              (OUT/f'{stem}.meta.json').write_text(json.dumps(meta,ensure_ascii=False,indent=2,sort_keys=True)+'\n')
+              print(json.dumps(meta,ensure_ascii=False),flush=True)
+              return meta
+          cases=[]
+          for y in [93,94,100,106,115]:
+              for market in ['sii','otc','pub']:
+                  cases.append((f'market_{y:03d}_{market}',{'scopeType':'2','companyId':'','dateType':'1','firstDate':f'{y:03d}0101','lastDate':f'{y+1:03d}0101','marketKind':market,'announcementBasis':'0','dateRangeType':'','announcementType':'1','sort':'1'}))
+          for y in [93,94,100,106,115]:
+              cases.append((f'company_1101_{y:03d}',{'scopeType':'1','companyId':'1101','dateType':'1','firstDate':f'{y:03d}0101','lastDate':f'{y+1:03d}0101','marketKind':'sii','announcementBasis':'0','dateRangeType':'','announcementType':'1','sort':'1'}))
+          summary=[]
+          for case,body in cases:
+              try: summary.append(request(case,body))
+              except Exception as e:
+                  m={'case':case,'terminal_error':repr(e)}; summary.append(m); print(json.dumps(m),flush=True)
+              time.sleep(.5)
+          historical_real=[x for x in summary if x.get('case','').find('_115')<0 and x.get('api_code')==200 and x.get('result_row_count',0)>0]
+          verdict={'schema':'w08_t146_jsonapi_probe_v7','endpoint':URL,'cases':len(summary),'historical_real_case_count':len(historical_real),'historical_real_cases':[x['case'] for x in historical_real],'historical_contract_candidate':bool(historical_real),'summary':summary}
+          (OUT/'VERDICT.json').write_text(json.dumps(verdict,ensure_ascii=False,indent=2,sort_keys=True)+'\n')
+          print('VERDICT',json.dumps({k:v for k,v in verdict.items() if k!='summary'},ensure_ascii=False),flush=True)
+          if not historical_real: raise SystemExit('no historical real rows found')
+          PY
+      - name: Upload immutable probe evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: W08_T146_JSONAPI_PROBE_V7_20260912
+          path: out_t146_jsonapi_v7/
+          retention-days: 7
+          compression-level: 0
+          if-no-files-found: error
