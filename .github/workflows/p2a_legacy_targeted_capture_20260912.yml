@@ -1,0 +1,115 @@
+name: P2A legacy targeted non-overlap capture
+
+on:
+  push:
+    branches: [p2a-transport-20260912]
+    paths: [.github/workflows/p2a_legacy_targeted_capture_20260912.yml]
+
+permissions:
+  contents: write
+
+jobs:
+  capture:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: p2a-transport-20260912
+      - name: Capture 2001-06 through 2012-12 exact official legacy bytes
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import collections,datetime as dt,hashlib,html as htmlmod,json,os,pathlib,re,time,urllib.error,urllib.request,zipfile
+          CLAIMANT='P2-A-CHAT-20260912-1922'; OUT=pathlib.Path('out_targeted'); RAW=OUT/'raw'; META=OUT/'metadata'; CTRL=OUT/'control'
+          for p in (RAW,META,CTRL):p.mkdir(parents=True,exist_ok=True)
+          MARKETS={'TWSE':'sii','TPEX':'otc'}; START=(90,6); END=(101,12)
+          UA='Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120 Safari/537.36'
+          def sha(b):return hashlib.sha256(b).hexdigest()
+          def months(a,b):
+            y,m=a
+            while (y,m)<=b:
+              yield y,m;m+=1
+              if m==13:y+=1;m=1
+          def cell(x):return htmlmod.unescape(re.sub(r'<[^>]*>','',x)).replace('\xa0',' ').strip()
+          def validate(b):
+            if len(b)<500:return None
+            text=enc=None
+            for e in ('big5','cp950'):
+              try:text=b.decode(e);enc=e;break
+              except UnicodeDecodeError:pass
+            if text is None:text=b.decode('big5','replace');enc='big5-replace'
+            if '營業收入統計表' not in text:return None
+            widths=collections.Counter();codes=[]
+            for rm in re.finditer(r'<tr\b[^>]*>([\s\S]*?)</tr>',text,re.I):
+              cs=[cell(x) for x in re.findall(r'<td\b[^>]*>([\s\S]*?)</td>',rm.group(1),re.I)]
+              if cs and re.fullmatch(r'\d{4,6}',cs[0]):widths[len(cs)]+=1;codes.append(cs[0])
+            if not codes:return None
+            schema='MOPS_T21_LEGACY_HTML_11COL' if all(w==11 for w in widths) else ('MOPS_T21_LEGACY_HTML_V10' if all(9<=w<=11 for w in widths) else None)
+            return {'encoding':enc,'rows':len(codes),'unique_codes':len(set(codes)),'widths':dict(widths),'schema_family':schema} if schema else None
+          def fetch(url):
+            last=None
+            for i in range(5):
+              at=dt.datetime.now(dt.timezone.utc).isoformat().replace('+00:00','Z')
+              try:
+                req=urllib.request.Request(url,headers={'User-Agent':UA,'Referer':'https://mopsov.twse.com.tw/','Accept':'text/html,*/*','Connection':'close'})
+                with urllib.request.urlopen(req,timeout=45) as r:return {'ok':True,'status':getattr(r,'status',200),'body':r.read(),'headers':dict(r.headers.items()),'final_url':r.geturl(),'retrieved_at':at}
+              except urllib.error.HTTPError as e:
+                if e.code in (404,410):return {'ok':True,'status':e.code,'body':e.read() if hasattr(e,'read') else b'','headers':dict(e.headers.items()) if e.headers else {},'final_url':url,'retrieved_at':at}
+                last='HTTP '+str(e.code)
+              except Exception as e:last=repr(e)
+              time.sleep(min(4,1.5**i))
+            return {'ok':False,'status':None,'body':b'','headers':{},'final_url':url,'retrieved_at':at,'error':last}
+          def routes(code,y,m):
+            base='https://mopsov.twse.com.tw/nas/t21/{}/t21sc03_{}_{}'
+            if y<=98:return [('UNSUFFIXED',base.format(code,y,m)+'.html')]
+            return [('SPLIT_0',base.format(code,y,m)+'_0.html'),('SPLIT_1',base.format(code,y,m)+'_1.html')]
+          ledger=[];anomalies=[];coverage={}
+          for market,code in MARKETS.items():
+            valid_months=[]
+            for y,m in months(START,END):
+              members=[]
+              for route,url in routes(code,y,m):
+                r=fetch(url);v=validate(r['body']) if r['ok'] and r['status']==200 else None
+                md=META/market;rd=RAW/market;md.mkdir(parents=True,exist_ok=True);rd.mkdir(parents=True,exist_ok=True)
+                key=f'{y:03d}_{m:02d}_{route.lower()}'
+                if v:
+                  rp=rd/f'{key}.response.html';rp.write_bytes(r['body'])
+                  meta={'schema':'p2a_exact_http_capture_v2','dataset':'MONTHLY_REVENUE','claimant_id':CLAIMANT,'work_unit_id':f'P2A-LEGACY-{market}-{y:03d}-{m:02d}','market':market,'roc_year':y,'month':m,'route':route,'source_family':'MOPS_OFFICIAL_MONTHLY_REVENUE_LEGACY_HTML','schema_family':v['schema_family'],'method':'GET','request_url':url,'final_url':r['final_url'],'retrieved_at':r['retrieved_at'],'published_at':'unknown','available_at':'unknown','http_status':r['status'],'response_headers':r['headers'],'payload_bytes':len(r['body']),'payload_sha256':sha(r['body']),'encoding_detected':v['encoding'],'data_rows':v['rows'],'unique_company_codes':v['unique_codes'],'raw_semantics':'exact HTTP response body bytes','classification':'FORMAL_RAW_CANDIDATE_PENDING_BOUNDARY_AND_DRIVE_VERIFY'}
+                  mp=md/f'{key}.capture.json';mp.write_text(json.dumps(meta,ensure_ascii=False,indent=2,sort_keys=True)+'\n',encoding='utf-8')
+                  members.append({'route':route,'schema_family':v['schema_family'],'payload_bytes':len(r['body']),'payload_sha256':sha(r['body']),'source_url':url,'raw_path':str(rp.relative_to(OUT)),'metadata_path':str(mp.relative_to(OUT)),'rows':v['rows'],'unique_company_codes':v['unique_codes']})
+                else:
+                  anomalies.append({'market':market,'roc_year':y,'month':m,'route':route,'url':url,'transport_ok':r['ok'],'http_status':r['status'],'bytes':len(r['body']),'sha256':sha(r['body']) if r['body'] else None,'classification':'NON_DATA_VARIANT' if r['ok'] else 'TRANSPORT_ERROR','error':r.get('error')})
+                time.sleep(.02)
+              if not members:raise SystemExit(f'MISSING_MONTH {market} {y:03d}-{m:02d}')
+              valid_months.append((y,m));ledger.append({'work_unit_id':f'P2A-LEGACY-{market}-{y:03d}-{m:02d}','market':market,'roc_year':y,'month':m,'status':'RAW_CAPTURED_PENDING_CLOUD_VERIFY','formal_coverage_role':'PRE_MODERN_NON_OVERLAP','raw_members':members})
+            coverage[market]={'first_valid':f'{valid_months[0][0]:03d}-{valid_months[0][1]:02d}','last_valid':f'{valid_months[-1][0]:03d}-{valid_months[-1][1]:02d}','valid_months':len(valid_months),'missing_within_capture_scope':[]}
+          controls={'P2A_LEGACY_TARGETED_LEDGER.json':{'schema':'p2a_legacy_targeted_ledger_v1','work_units':ledger},'P2A_LEGACY_TARGETED_COVERAGE.json':{'schema':'p2a_legacy_targeted_coverage_v1','coverage':coverage,'boundary_claim':'NONE__AWAIT_INDEPENDENT_BROAD_SCAN'},'P2A_LEGACY_TARGETED_ANOMALIES.json':{'schema':'p2a_legacy_targeted_anomaly_v1','classified_variant_anomalies':anomalies,'unclassified_true_gaps':[]},'P2A_LEGACY_TARGETED_MANIFEST.json':{'schema':'p2a_legacy_targeted_manifest_v1','claimant_id':CLAIMANT,'work_units':len(ledger),'coverage':coverage,'members':ledger,'existing_modern_immutable':{'work_units':328,'drive_id':'1DhEmyWLvQCS3bA9zZri1QECyPpiKxuxB','sha256':'2087d70f2011552a7a6d12a931bdd3dd6df5fa62f9dbdf77bf5c1ed0509d4112'}}}
+          for n,o in controls.items():(CTRL/n).write_text(json.dumps(o,ensure_ascii=False,indent=2,sort_keys=True)+'\n',encoding='utf-8')
+          package=OUT/'P2A_MONTHLY_REVENUE_FORMAL_RAW_LEGACY_200106_201212_20260912.zip'; files=sorted(p for root in (RAW,META,CTRL) for p in root.rglob('*') if p.is_file())
+          with zipfile.ZipFile(package,'w',compression=zipfile.ZIP_DEFLATED,compresslevel=9) as z:
+            for p in files:z.write(p,p.relative_to(OUT).as_posix())
+          psha=sha(package.read_bytes());info={'schema':'p2a_legacy_targeted_package_info_v1','run_id':os.environ.get('GITHUB_RUN_ID'),'file_name':package.name,'bytes':package.stat().st_size,'sha256':psha,'member_count':len(files),'new_formal_wus_candidate':len(ledger),'coverage':coverage,'capture_status':'PASS_COMPLETE_NON_OVERLAP_CAPTURE_PENDING_BROAD_BOUNDARY_CONFIRMATION_AND_DRIVE_VERIFY'}
+          (OUT/'P2A_LEGACY_TARGETED_PACKAGE_INFO.json').write_text(json.dumps(info,ensure_ascii=False,indent=2,sort_keys=True)+'\n',encoding='utf-8');(OUT/'SHA256SUMS_TARGETED.txt').write_text(f'{psha}  {package.name}\n')
+          pathlib.Path('p2a-results').mkdir(exist_ok=True);pathlib.Path('p2a-results/p2a_legacy_targeted_latest.json').write_text(json.dumps(info,ensure_ascii=False,indent=2,sort_keys=True)+'\n',encoding='utf-8')
+          print(json.dumps(info,ensure_ascii=False))
+          PY
+      - name: Upload targeted legacy artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: P2A_MONTHLY_REVENUE_FORMAL_RAW_LEGACY_200106_201212_20260912
+          path: out_targeted/
+          if-no-files-found: error
+          retention-days: 7
+      - name: Publish compact run pointer
+        if: always()
+        shell: bash
+        run: |
+          if [ -f p2a-results/p2a_legacy_targeted_latest.json ]; then
+            git config user.name 'p2a-automation'
+            git config user.email 'actions@users.noreply.github.com'
+            git add p2a-results/p2a_legacy_targeted_latest.json
+            git commit -m 'P2-A targeted legacy capture result ${{ github.run_id }}' || true
+            git push origin HEAD:p2a-transport-20260912
+          fi
