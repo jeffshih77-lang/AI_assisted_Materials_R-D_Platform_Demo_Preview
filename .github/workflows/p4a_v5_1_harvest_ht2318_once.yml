@@ -1,0 +1,114 @@
+name: P4-A V5.1 harvest frozen HT2318 once
+on:
+  push:
+    paths:
+      - '.github/workflows/p4a_v5_1_harvest_ht2318_once.yml'
+permissions:
+  actions: read
+  contents: read
+jobs:
+  harvest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      SOURCE_RUN_ID: '34685616731'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Harvest frozen successful HT RAW without source requests
+        shell: bash
+        run: |
+          set -euo pipefail
+          state=$(gh api "repos/$REPO/actions/runs/$SOURCE_RUN_ID" --jq '.status')
+          test "$state" = completed
+          mkdir -p work/outer work/unpack drive_ready
+          gh api "repos/$REPO/actions/runs/$SOURCE_RUN_ID/artifacts?per_page=100" --paginate --slurp > work/artifact-pages.json
+          python - <<'PY'
+          import json, os, re, pathlib, hashlib, zipfile, subprocess
+          repo=os.environ['REPO']; run_id=int(os.environ['SOURCE_RUN_ID'])
+          frozen=json.load(open('p4a_runner/P4A_EXACT_MISSING_PLAN_V5_20260912.json'))
+          v5={(int(r['roc']),r['kind'],p) for r in frozen['runs'] for p in range(int(r['start']),int(r['end'])+1)}
+          formal77={(96,'O',p) for p in range(50,100)} | {(98,'O',p) for p in range(75,100)} | {(98,'O',p) for p in range(125,127)}
+          expected=v5-formal77
+          assert len(v5)==8425 and len(formal77)==77 and len(expected)==8348
+          pages=[]
+          for obj in json.load(open('work/artifact-pages.json')): pages += obj.get('artifacts',[])
+          pat=re.compile(r'^p4a-v5r-gap-ROC(\d+)-([LO])-P(\d+)-(\d+)$')
+          selected=[]
+          for a in pages:
+            m=pat.match(a.get('name',''))
+            if not m or a.get('expired'): continue
+            y=int(m.group(1)); k=m.group(2); s=int(m.group(3)); e=int(m.group(4))
+            selected.append((a,y,k,s,e))
+          selected.sort(key=lambda t:(t[1],t[2],t[3],t[4],t[0]['id']))
+          assert len(selected)==239, len(selected)
+          entries=[]; covered=set()
+          for a,y,k,s,e in selected:
+            rng={(y,k,p) for p in range(s,e+1)}
+            assert rng <= expected, (a['name'],'outside V5.1 exact missing set')
+            assert not (covered & rng), (a['name'],'duplicate success coverage')
+            outer=pathlib.Path('work/outer')/f"artifact_{a['id']}.zip"
+            subprocess.run(['curl','-fL','--retry','5','--retry-delay','2','-H',f"Authorization: Bearer {os.environ['GH_TOKEN']}",'-H','X-GitHub-Api-Version: 2022-11-28','-o',str(outer),a['archive_download_url']],check=True)
+            ob=outer.read_bytes(); outer_sha=hashlib.sha256(ob).hexdigest(); digest=a.get('digest') or ''
+            if digest.startswith('sha256:'): assert outer_sha==digest.split(':',1)[1], (a['name'],'outer digest mismatch')
+            dest=pathlib.Path('work/unpack')/str(a['id']); dest.mkdir(parents=True,exist_ok=True)
+            with zipfile.ZipFile(outer) as z: z.extractall(dest)
+            childs=[p for p in dest.rglob('*.zip') if p.is_file()]
+            assert len(childs)==1,(a['name'],childs)
+            child=childs[0]; cb=child.read_bytes(); csha=hashlib.sha256(cb).hexdigest()
+            with zipfile.ZipFile(child) as z:
+              mans=[n for n in z.namelist() if n=='MANIFEST.json' or n.endswith('/MANIFEST.json')]
+              assert len(mans)==1
+              man=json.loads(z.read(mans[0]).decode('utf-8-sig'))
+            assert man['schema']=='p4a_material_info_page_chunk_v4'
+            c=man['coverage']; ass=man['assertions']; caps=man.get('captures',[]); anos=man.get('anomalies',[])
+            assert (int(c['roc_year']),c['kind'],int(c['start_page']),int(c['end_page']))==(y,k,s,e)
+            pc=e-s+1
+            assert int(ass['page_count'])==pc and int(ass['list_capture_count'])==pc
+            assert ass['all_http_200'] is True and ass['all_payload_nonempty'] is True
+            assert all(x.get('http_status')==200 and int(x.get('payload_bytes',0))>0 for x in caps)
+            assert int(ass['nonstandard_detail_count'])==len(anos)
+            assert all(x.get('disposition')=='PRESERVE_RAW_DO_NOT_ZERO_FILL' for x in anos)
+            stored=f"artifact_{a['id']}__{child.name}"
+            entries.append({'artifact_id':a['id'],'artifact_name':a['name'],'artifact_outer_sha256':outer_sha,'child_stored_name':stored,'child_original_name':child.name,'child_sha256':csha,'child_size':len(cb),'coverage':{'roc_year':y,'kind':k,'start_page':s,'end_page':e,'page_count':pc},'assertions':{'list_capture_count':int(ass['list_capture_count']),'detail_capture_count':int(ass['detail_capture_count']),'nonstandard_detail_count':int(ass['nonstandard_detail_count']),'all_http_200':True,'all_payload_nonempty':True},'_child_path':str(child)})
+            covered |= rng
+          assert len(covered)==2318, len(covered)
+          residual=expected-covered
+          assert len(residual)==6030, len(residual)
+          def compress(keys):
+            out=[]; by={}
+            for y,k,p in sorted(keys): by.setdefault((y,k),[]).append(p)
+            for (y,k),ps in by.items():
+              st=pr=ps[0]
+              for p in ps[1:]:
+                if p==pr+1: pr=p
+                else: out.append({'roc':y,'kind':k,'start':st,'end':pr,'page_count':pr-st+1}); st=pr=p
+              out.append({'roc':y,'kind':k,'start':st,'end':pr,'page_count':pr-st+1})
+            return out
+          summary={'schema':'p4a_v5_1_ht2318_harvest_summary_v1','lane_code':'P4-A','dataset':'MATERIAL_INFO','source_run_id':run_id,'source_requests_made_by_harvest':False,'formal_v5_1_expected_pages':8348,'successful_pages':len(covered),'residual_missing_pages':len(residual),'successful_artifact_count':len(entries),'residual_ranges':compress(residual)}
+          pathlib.Path('drive_ready/P4A_V5_1_HT2318_HARVEST_SUMMARY.json').write_text(json.dumps(summary,ensure_ascii=False,indent=2,sort_keys=True)+'\n')
+          target=85*1024*1024
+          groups=[]; cur=[]; sz=0
+          for e in entries:
+            csz=int(e['child_size']); assert csz<target
+            if cur and sz+csz>target: groups.append(cur); cur=[]; sz=0
+            cur.append(e); sz+=csz
+          if cur: groups.append(cur)
+          for i,g in enumerate(groups,1):
+            clean=[{k:v for k,v in e.items() if k!='_child_path'} for e in g]
+            idx={'schema':'p4a_v5_1_drive_subbundle_index_v1','lane_code':'P4-A','dataset':'MATERIAL_INFO','source_run_id':run_id,'source_requests_made_by_harvest':False,'part':i,'part_count':len(groups),'artifact_count':len(g),'unique_page_count':sum(x['coverage']['page_count'] for x in clean),'entries':clean}
+            out=pathlib.Path('drive_ready')/f"P4A-V5.1-HT2318-PART{i:03d}-RUN{run_id}.zip"
+            with zipfile.ZipFile(out,'w',compression=zipfile.ZIP_STORED) as z:
+              z.writestr('BUNDLE_INDEX.json',(json.dumps(idx,ensure_ascii=False,indent=2,sort_keys=True)+'\n').encode())
+              for e in g: z.write(e['_child_path'],e['child_stored_name'])
+            assert out.stat().st_size<100*1024*1024
+          print(json.dumps(summary,ensure_ascii=False,sort_keys=True))
+          print('drive_ready_parts',len(groups))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: p4a-v5-1-ht2318-drive-ready
+          path: drive_ready/*
+          if-no-files-found: error
+          retention-days: 3
