@@ -1,0 +1,153 @@
+name: P2-C TPEx legacy formal RAW v1
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/p2c_tpex_legacy_formal_raw_v1.yml
+
+permissions:
+  contents: read
+
+jobs:
+  capture:
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        ym: [2003-08,2003-09,2003-10,2003-11,2003-12,2004-01,2004-02,2004-03,2004-04,2004-05,2004-06,2004-07,2004-08,2004-09,2004-10,2004-11,2004-12,2005-01,2005-02,2005-03,2005-04,2005-05,2005-06,2005-07,2005-08,2005-09,2005-10,2005-11,2005-12,2006-01,2006-02,2006-03,2006-04,2006-05,2006-06,2006-07,2006-08,2006-09,2006-10,2006-11,2006-12]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      YM: ${{ matrix.ym }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Capture official legacy static daily files
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import urllib.request, urllib.error, ssl, pathlib, hashlib, json, datetime, time, os, calendar, sys, re
+          ym=os.environ['YM']; year,month=map(int,ym.split('-'))
+          out=pathlib.Path(f'out_p2c_tpex_legacy_{year}{month:02d}')
+          raw=out/'raw'/'TPEX_PERATIO_LEGACY'; raw.mkdir(parents=True)
+          manifest=[]; anomalies=[]; UA='Mozilla/5.0 P2-C-LegacyFormalRAW/1.0'
+          default_ctx=ssl.create_default_context(); insecure_ctx=ssl._create_unverified_context()
+          start=datetime.date(year,month,1); end=datetime.date(year,month,calendar.monthrange(year,month)[1])
+          boundary=datetime.date(2003,8,1)
+          if start<boundary: start=boundary
+          def fetch(url):
+            last=None
+            for attempt in range(1,6):
+              req=urllib.request.Request(url,headers={'User-Agent':UA,'Accept':'text/html,*/*','Accept-Encoding':'identity','Connection':'close'})
+              try:
+                with urllib.request.urlopen(req,timeout=45,context=default_ctx) as r:
+                  return r.status,r.geturl(),r.read(),attempt,None,True,None
+              except urllib.error.HTTPError as e:
+                b=e.read(); code=e.code
+                if code>=500 and attempt<5:
+                  last=f'HTTPError:{code}'; time.sleep(0.8*attempt); continue
+                return code,e.geturl(),b,attempt,f'HTTPError:{code}',True,None
+              except ssl.SSLCertVerificationError as e:
+                try:
+                  with urllib.request.urlopen(req,timeout=45,context=insecure_ctx) as r:
+                    return r.status,r.geturl(),r.read(),attempt,None,False,'SERVER_CHAIN_NOT_VERIFIABLE_STRICT_TLS_FALLBACK'
+                except urllib.error.HTTPError as ie:
+                  b=ie.read(); code=ie.code
+                  if code>=500 and attempt<5:
+                    last=f'HTTPError:{code}_AFTER_TLS_FALLBACK'; time.sleep(0.8*attempt); continue
+                  return code,ie.geturl(),b,attempt,f'HTTPError:{code}',False,'SERVER_CHAIN_NOT_VERIFIABLE_STRICT_TLS_FALLBACK'
+                except Exception as ie:
+                  last=f'{type(ie).__name__}:{ie}'; time.sleep(0.8*attempt); continue
+              except Exception as e:
+                last=f'{type(e).__name__}:{e}'; time.sleep(0.8*attempt)
+            return None,url,b'',5,last,False,'RETRY_EXHAUSTED'
+          def classify(body,roc):
+            # Official missing static files return a UTF-8 TPEx not-found page with HTTP 200.
+            utf=body.decode('utf-8',errors='replace')
+            if '您所輸入的網址並不存在' in utf or 'the page you requested was not found' in utf.lower():
+              return {'kind':'NO_DATA','encoding':'utf-8','internal_date':None,'rows_hint':0,'cf_injected':'__CF$cv$params' in utf}
+            best=None
+            for enc in ('cp950','big5','utf-8'):
+              t=body.decode(enc,errors='replace'); bad=t.count('�')
+              if best is None or bad<best[0]: best=(bad,enc,t)
+            _,enc,t=best
+            # Historical Oracle report pages show `資料日期： YYMMDD` and the five valuation columns.
+            m=re.search(r'資料日期\s*[:：]?\s*([0-9]{6})',t)
+            internal=m.group(1) if m else None
+            headers=all(x in t for x in ('證券代號','證券名稱','本益比','股利率','股價淨值比'))
+            # Count plausible security-code occurrences in text; only a hint, not a transformation of RAW.
+            rows=len(re.findall(r'(?<![0-9])(?:[1-9][0-9]{3,5})(?![0-9])',t)) if headers else 0
+            kind='DATA' if headers and internal==roc and len(body)>10000 else 'OTHER'
+            return {'kind':kind,'encoding':enc,'internal_date':internal,'rows_hint':rows,'cf_injected':'__CF$cv$params' in t}
+          d=start
+          while d<=end:
+            roc=f'{d.year-1911:02d}{d.month:02d}{d.day:02d}'
+            url=f'https://hist.tpex.org.tw/Hist/STOCK/AFTERTRADING/PERATIO_ANALYSIS/RSTA3103_{roc}.HTML'
+            status,final,b,attempt,err,tls_verified,tls_exception=fetch(url)
+            p=raw/f'{d.strftime("%Y%m%d")}.html'; p.write_bytes(b)
+            c=classify(b,roc)
+            m={'source':'TPEX_PERATIO_LEGACY','date':d.strftime('%Y%m%d'),'roc_date':roc,'url':url,'final_url':final,'status':status,'bytes':len(b),'sha256':hashlib.sha256(b).hexdigest(),'fetched_at_utc':datetime.datetime.now(datetime.timezone.utc).isoformat(),'attempt':attempt,'error':err,'tls_verified':tls_verified,'tls_exception':tls_exception,**c}
+            manifest.append(m)
+            if status!=200 or err or c['kind'] not in ('DATA','NO_DATA') or (c['kind']=='DATA' and c['internal_date']!=roc): anomalies.append(m)
+            time.sleep(0.12)
+            d+=datetime.timedelta(days=1)
+          summary={'ym':ym,'records':len(manifest),'data_days':sum(x['kind']=='DATA' for x in manifest),'no_data_days':sum(x['kind']=='NO_DATA' for x in manifest),'cf_injected_days':sum(bool(x.get('cf_injected')) for x in manifest),'tls_fallback_days':sum(not x.get('tls_verified',False) for x in manifest),'anomaly_count':len(anomalies)}
+          (out/'MANIFEST.jsonl').write_text(''.join(json.dumps(x,ensure_ascii=False,sort_keys=True)+'\n' for x in manifest))
+          (out/'ANOMALIES.jsonl').write_text(''.join(json.dumps(x,ensure_ascii=False,sort_keys=True)+'\n' for x in anomalies))
+          (out/'SUMMARY.json').write_text(json.dumps(summary,ensure_ascii=False,sort_keys=True,indent=2)+'\n')
+          (out/'SHA256SUMS.txt').write_text(''.join(f'{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.relative_to(out)}\n' for p in sorted(raw.glob('*.html'))))
+          print(json.dumps(summary,ensure_ascii=False))
+          if anomalies: sys.exit(2)
+          PY
+      - name: Upload legacy monthly RAW
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: p2c-tpex-legacy-month-${{ matrix.ym }}-v1
+          path: out_p2c_tpex_legacy_*/
+          if-no-files-found: error
+          retention-days: 7
+  aggregate:
+    needs: capture
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: p2c-tpex-legacy-month-*-v1
+          path: monthly
+          merge-multiple: true
+      - name: Validate and aggregate legacy range
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import pathlib,json,sys
+          root=pathlib.Path('monthly'); outs=sorted(root.glob('out_p2c_tpex_legacy_*'))
+          expected=41; summaries=[]; anomalies=[]; manifests=[]
+          for d in outs:
+            sp=d/'SUMMARY.json'
+            if not sp.exists(): anomalies.append({'type':'MISSING_SUMMARY','dir':str(d)}); continue
+            s=json.loads(sp.read_text()); summaries.append(s)
+            if s.get('anomaly_count')!=0: anomalies.append({'type':'MONTH_ANOMALY','ym':s.get('ym'),'count':s.get('anomaly_count')})
+            mp=d/'MANIFEST.jsonl'
+            if mp.exists(): manifests.extend(json.loads(x) for x in mp.read_text().splitlines() if x.strip())
+          if len(outs)!=expected: anomalies.append({'type':'MONTH_COUNT','expected':expected,'actual':len(outs)})
+          out=pathlib.Path('aggregate_p2c_tpex_legacy_200308_200612_v1'); out.mkdir()
+          (out/'MONTH_SUMMARIES.json').write_text(json.dumps(summaries,ensure_ascii=False,sort_keys=True,indent=2)+'\n')
+          (out/'MANIFEST.jsonl').write_text(''.join(json.dumps(x,ensure_ascii=False,sort_keys=True)+'\n' for x in manifests))
+          (out/'AGGREGATE_ANOMALIES.json').write_text(json.dumps(anomalies,ensure_ascii=False,sort_keys=True,indent=2)+'\n')
+          summary={'range':'2003-08-01..2006-12-31','months':len(outs),'manifest_records':len(manifests),'data_days':sum(x['kind']=='DATA' for x in manifests),'no_data_days':sum(x['kind']=='NO_DATA' for x in manifests),'cf_injected_days':sum(bool(x.get('cf_injected')) for x in manifests),'anomaly_count':len(anomalies)}
+          (out/'SUMMARY.json').write_text(json.dumps(summary,ensure_ascii=False,sort_keys=True,indent=2)+'\n')
+          print(json.dumps(summary,ensure_ascii=False,indent=2))
+          if anomalies: sys.exit(2)
+          PY
+      - name: Upload legacy aggregate index
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: p2c-tpex-legacy-aggregate-200308-200612-v1
+          path: aggregate_p2c_tpex_legacy_200308_200612_v1/
+          if-no-files-found: error
+          retention-days: 7
