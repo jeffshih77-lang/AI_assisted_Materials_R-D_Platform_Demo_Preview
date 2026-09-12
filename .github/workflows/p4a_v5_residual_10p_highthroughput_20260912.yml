@@ -1,0 +1,166 @@
+name: P4-A V5 residual 10p highthroughput 20260912
+on:
+  push:
+    paths:
+      - '.github/workflows/p4a_v5_residual_10p_highthroughput_20260912.yml'
+  workflow_dispatch:
+permissions:
+  actions: read
+  contents: read
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      m1: ${{ steps.plan.outputs.m1 }}
+      m2: ${{ steps.plan.outputs.m2 }}
+      m3: ${{ steps.plan.outputs.m3 }}
+      m4: ${{ steps.plan.outputs.m4 }}
+      page_count: ${{ steps.plan.outputs.page_count }}
+      item_count: ${{ steps.plan.outputs.item_count }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      PREDECESSOR_RUN: '34685276466'
+    steps:
+      - uses: actions/checkout@v4
+      - id: plan
+        run: |
+          set -euo pipefail
+          test "$(git hash-object p4a_runner/P4A_EXACT_MISSING_PLAN_V5_20260912.json)" = "e04239d0a345051209cccb82db9d552f11a79a84"
+          gh api "repos/$REPO/actions/runs/$PREDECESSOR_RUN/artifacts?per_page=100" --paginate --slurp > predecessor.json
+          python - <<'PY'
+          import json,re,os
+          p=json.load(open('p4a_runner/P4A_EXACT_MISSING_PLAN_V5_20260912.json'))
+          assert p['authoritative_audit_drive_id']=='1xxO1eRiGAW9V1iE_nZdvT48LLEUDg7Gj'
+          assert p['authoritative_audit_sha256']=='038febd8bbdc32cf7e5243c843d975d4a8711ba27a338ec910428b1173e3fe2a'
+          required={(int(r['roc']),r['kind'],page) for r in p['runs'] for page in range(int(r['start']),int(r['end'])+1)}
+          assert len(required)==8425
+          arts=[]
+          for obj in json.load(open('predecessor.json')): arts += obj.get('artifacts',[])
+          rx=re.compile(r'^p4a-v5a-gap-ROC(\d+)-([LO])-P(\d+)-(\d+)$')
+          done=set(); names=[]
+          for a in arts:
+            if a.get('expired'): continue
+            m=rx.match(a.get('name',''))
+            if not m: continue
+            y=int(m.group(1)); k=m.group(2); s=int(m.group(3)); e=int(m.group(4))
+            rng={(y,k,x) for x in range(s,e+1)}
+            assert rng <= required
+            assert not (done & rng), (a['name'],'overlaps predecessor successful artifact')
+            done |= rng; names.append(a['name'])
+          assert len(done)==77, f'expected frozen predecessor success=77 pages, got {len(done)} names={names}'
+          residual=required-done
+          assert len(residual)==8348
+          items=[]
+          for y in range(81,116):
+            for k in ('L','O'):
+              ps=sorted(x for yy,kk,x in residual if yy==y and kk==k)
+              if not ps: continue
+              st=pr=ps[0]
+              runs=[]
+              for x in ps[1:]:
+                if x==pr+1: pr=x
+                else: runs.append((st,pr)); st=pr=x
+              runs.append((st,pr))
+              for s,e in runs:
+                q=s
+                while q<=e:
+                  z=min(e,q+9)
+                  items.append({'roc':y,'kind':k,'start':q,'end':z,'page_count':z-q+1})
+                  q=z+1
+          assert sum(x['page_count'] for x in items)==8348
+          groups=[items[i::4] for i in range(4)]
+          assert all(len(g)<=256 for g in groups), [len(g) for g in groups]
+          with open(os.environ['GITHUB_OUTPUT'],'a') as f:
+            for i,g in enumerate(groups,1): f.write(f'm{i}='+json.dumps({'include':g},separators=(',',':'))+'\n')
+            f.write('page_count=8348\n')
+            f.write('item_count='+str(len(items))+'\n')
+          print('frozen V5 required',len(required),'predecessor_success',len(done),'residual',len(residual),'items',len(items),'groups',[len(g) for g in groups])
+          PY
+
+  capture1:
+    needs: plan
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix: ${{ fromJson(needs.plan.outputs.m1) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env: &cap_env
+      ROC_YEAR: ${{ matrix.roc }}
+      KIND: ${{ matrix.kind }}
+      START_PAGE: ${{ matrix.start }}
+      END_PAGE: ${{ matrix.end }}
+      DETAIL_WORKERS: '8'
+    steps: &cap_steps
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - name: Capture frozen residual only
+        run: |
+          set -euo pipefail
+          cp p4a_runner/p4a_material_info_page_chunk_v4.py /tmp/p4a_collector.py
+          sed -i 's/def get(url, retries=3):/def get(url, retries=20):/' /tmp/p4a_collector.py
+          python /tmp/p4a_collector.py
+      - name: Validate V4 RAW fail closed
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json,os,pathlib
+          roots=[p for p in pathlib.Path('out_p4a_chunk').iterdir() if p.is_dir()]; assert len(roots)==1
+          m=json.load(open(roots[0]/'MANIFEST.json')); assert m['schema']=='p4a_material_info_page_chunk_v4'
+          c=m['coverage']; a=m['assertions']; y=int(os.environ['ROC_YEAR']); k=os.environ['KIND']; s=int(os.environ['START_PAGE']); e=int(os.environ['END_PAGE'])
+          assert (int(c['roc_year']),c['kind'],int(c['start_page']),int(c['end_page']))==(y,k,s,e)
+          assert int(a['page_count'])==e-s+1 and int(a['list_capture_count'])==e-s+1
+          assert a['all_http_200'] is True and a['all_payload_nonempty'] is True
+          assert int(a['nonstandard_detail_count'])==len(m.get('anomalies',[]))
+          assert all(x.get('disposition')=='PRESERVE_RAW_DO_NOT_ZERO_FILL' for x in m.get('anomalies',[]))
+          PY
+      - name: Package immutable RAW
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import pathlib,zipfile
+          roots=[p for p in pathlib.Path('out_p4a_chunk').iterdir() if p.is_dir()]; assert len(roots)==1
+          root=roots[0]; out=pathlib.Path(root.name+'.zip')
+          with zipfile.ZipFile(out,'w',zipfile.ZIP_DEFLATED) as z:
+            for p in sorted(root.rglob('*')):
+              if p.is_file(): z.write(p,p.relative_to(root.parent))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: p4a-v5r-gap-ROC${{ matrix.roc }}-${{ matrix.kind }}-P${{ matrix.start }}-${{ matrix.end }}
+          path: P4A-MATERIAL-ROC${{ matrix.roc }}-${{ matrix.kind }}-P*.zip
+          if-no-files-found: error
+          retention-days: 3
+
+  capture2:
+    needs: plan
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix: ${{ fromJson(needs.plan.outputs.m2) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env: *cap_env
+    steps: *cap_steps
+  capture3:
+    needs: plan
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix: ${{ fromJson(needs.plan.outputs.m3) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env: *cap_env
+    steps: *cap_steps
+  capture4:
+    needs: plan
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix: ${{ fromJson(needs.plan.outputs.m4) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env: *cap_env
+    steps: *cap_steps
