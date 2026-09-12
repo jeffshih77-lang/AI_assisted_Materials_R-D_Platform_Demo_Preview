@@ -14,7 +14,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Parse one public 2012 forum page and test public attachment only
+      - name: Inspect one public 2012 forum page at raw-byte level
         shell: bash
         run: |
           set -euo pipefail
@@ -22,67 +22,60 @@ jobs:
           python3 - <<'PY'
           import hashlib, html, json, pathlib, re, urllib.parse, urllib.request
           out=pathlib.Path('out')
-          urls=[
-            'https://forum.twbts.com/thread-7341-1-1.html',
-            'https://forum.twbts.com/viewthread.php?tid=7341'
-          ]
-          result={'scope':'single_public_page_attachment_probe','pages':[],'candidate_links':[],'attachment':None}
-          decoded=''; base=''
-          for u in urls:
-            try:
-              req=urllib.request.Request(u,headers={'User-Agent':'Mozilla/5.0 P2D-Q016-PublicArchiveProbe/1.0'})
-              with urllib.request.urlopen(req,timeout=30) as r:
-                b=r.read(); status=getattr(r,'status',200); ct=r.headers.get('Content-Type','')
-              rec={'url':u,'status':status,'bytes':len(b),'sha256':hashlib.sha256(b).hexdigest(),'content_type':ct}
-              result['pages'].append(rec)
-              if status==200 and b:
-                for enc in ('utf-8','cp950','big5'):
-                  try:
-                    s=b.decode(enc)
-                    if '交易明細' in s or 'attachment.php' in s:
-                      decoded=s; base=u; rec['decoded_as']=enc; break
-                  except Exception: pass
-                if decoded:
-                  (out/'forum_7341.html').write_bytes(b)
-                  break
-            except Exception as e:
-              result['pages'].append({'url':u,'error':repr(e)})
-          if decoded:
-            decoded=html.unescape(decoded)
-            links=[]
-            for m in re.finditer(r'href\s*=\s*["\']([^"\']+)["\']',decoded,re.I):
-              href=m.group(1)
-              if 'attachment.php' in href.lower() or '.rar' in href.lower():
-                full=urllib.parse.urljoin(base,href)
-                if full not in links: links.append(full)
-            # also keep local context around the visible attachment name
+          u='https://forum.twbts.com/thread-7341-1-1.html'
+          result={'scope':'one_public_page_raw_byte_attachment_probe','page_url':u,'attachment':None}
+          try:
+            req=urllib.request.Request(u,headers={'User-Agent':'Mozilla/5.0 P2D-Q016-PublicArchiveProbe/1.1'})
+            with urllib.request.urlopen(req,timeout=30) as r:
+              b=r.read(); status=getattr(r,'status',200); ct=r.headers.get('Content-Type','')
+            (out/'forum_7341_raw.html').write_bytes(b)
+            result.update({'status':status,'bytes':len(b),'sha256':hashlib.sha256(b).hexdigest(),'content_type':ct})
+            lower=b.lower()
+            result['ascii_attachment_php_count']=lower.count(b'attachment.php')
+            result['ascii_aid_count']=lower.count(b'aid=')
+            result['ascii_rar_count']=lower.count(b'.rar')
+            hrefs=[]
+            for m in re.finditer(br'href\s*=\s*["\']([^"\']+)["\']',b,re.I):
+              raw=m.group(1)
+              if b'attachment.php' in raw.lower() or b'.rar' in raw.lower():
+                s=raw.decode('ascii','replace')
+                full=urllib.parse.urljoin(u,html.unescape(s))
+                if full not in hrefs: hrefs.append(full)
+            result['candidate_links']=hrefs
+            # Decode only for context; attachment decision relies on raw ASCII href bytes above.
             contexts=[]
-            for m in re.finditer('交易明細',decoded):
-              contexts.append(re.sub(r'\s+',' ',decoded[max(0,m.start()-500):m.end()+500])[:1200])
-            result['candidate_links']=links
-            result['contexts']=contexts[:5]
-            # One candidate request maximum. No login, CAPTCHA, cookies, retries, or bypass.
-            if links:
-              u=links[0]
+            for enc in ('big5hkscs','cp950','big5','utf-8'):
               try:
-                req=urllib.request.Request(u,headers={'User-Agent':'Mozilla/5.0 P2D-Q016-PublicArchiveProbe/1.0','Referer':base})
-                with urllib.request.urlopen(req,timeout=30) as r:
-                  b=r.read(); status=getattr(r,'status',200); ct=r.headers.get('Content-Type',''); final=r.geturl()
-                a={'url':u,'final_url':final,'status':status,'bytes':len(b),'sha256':hashlib.sha256(b).hexdigest(),'content_type':ct,'magic_hex':b[:16].hex()}
-                is_archive=b.startswith(b'Rar!') or b.startswith(b'PK\x03\x04') or 'rar' in ct.lower() or 'octet-stream' in ct.lower()
-                a['archive_like']=is_archive
-                result['attachment']=a
-                if is_archive and status==200:
-                  (out/'transaction_detail_attachment.bin').write_bytes(b)
+                s=b.decode(enc,errors='replace')
+                result.setdefault('decode_checks',[]).append({'encoding':enc,'has_transaction_detail':'交易明細' in s,'has_attachment_php':'attachment.php' in s})
+                if '交易明細' in s:
+                  for m in re.finditer('交易明細',s):
+                    contexts.append(re.sub(r'\s+',' ',s[max(0,m.start()-400):m.end()+600])[:1200])
+                  if contexts: break
               except Exception as e:
-                result['attachment']={'url':u,'error':repr(e)}
+                result.setdefault('decode_checks',[]).append({'encoding':enc,'error':repr(e)})
+            result['contexts']=contexts[:3]
+            # At most one anonymous public attachment request; no guessed IDs, login, cookie reuse, CAPTCHA or retries.
+            if hrefs:
+              au=hrefs[0]
+              try:
+                areq=urllib.request.Request(au,headers={'User-Agent':'Mozilla/5.0 P2D-Q016-PublicArchiveProbe/1.1','Referer':u})
+                with urllib.request.urlopen(areq,timeout=30) as r:
+                  ab=r.read(); ast=getattr(r,'status',200); act=r.headers.get('Content-Type',''); final=r.geturl()
+                archive=ab.startswith(b'Rar!') or ab.startswith(b'PK\x03\x04') or 'rar' in act.lower() or 'octet-stream' in act.lower()
+                result['attachment']={'url':au,'final_url':final,'status':ast,'bytes':len(ab),'sha256':hashlib.sha256(ab).hexdigest(),'content_type':act,'magic_hex':ab[:16].hex(),'archive_like':archive}
+                if ast==200 and archive: (out/'transaction_detail_attachment.bin').write_bytes(ab)
+              except Exception as e:
+                result['attachment']={'url':au,'error':repr(e)}
+          except Exception as e:
+            result['page_error']=repr(e)
           (out/'q016_manifest.json').write_text(json.dumps(result,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
           print(json.dumps(result,ensure_ascii=False,indent=2))
           PY
       - name: Upload one-day probe artifact
         uses: actions/upload-artifact@v4
         with:
-          name: p2d-q016-forum-probe
+          name: p2d-q016-forum-probe-v2
           path: out/
           if-no-files-found: error
           retention-days: 1
