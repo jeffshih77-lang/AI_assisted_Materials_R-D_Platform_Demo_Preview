@@ -1,9 +1,8 @@
 {
-  "authoritative_audit_drive_id": "13hURqj9MCXSeDXiu9FVVlTqYRHlf6XLC",
-  "authoritative_audit_sha256": "de540faa34e3c16444666117983aa578342427e75880db6eec0669ebb86b291c",
+  "authoritative_audit_drive_id": "1M8lSuMKu-rr9Xw-tdaR4zLHTH9SQ9R6x",
+  "authoritative_audit_sha256": "99fa60093c1626c708878a99ab9306e42fe9f3851802cc1a094ef55cd07cdaf1",
   "dataset": "MATERIAL_INFO",
   "exact_missing_ranges": [
-    {"end":262,"kind":"L","page_count":1,"roc":112,"start":262},
     {"end":39,"kind":"O","page_count":5,"roc":112,"start":35},
     {"end":64,"kind":"O","page_count":5,"roc":112,"start":60},
     {"end":114,"kind":"O","page_count":5,"roc":112,"start":110},
@@ -18,7 +17,6 @@
     {"end":9,"kind":"L","page_count":10,"roc":113,"start":0},
     {"end":24,"kind":"L","page_count":10,"roc":113,"start":15},
     {"end":199,"kind":"L","page_count":170,"roc":113,"start":30},
-    {"end":203,"kind":"L","page_count":1,"roc":113,"start":203},
     {"end":234,"kind":"L","page_count":30,"roc":113,"start":205},
     {"end":249,"kind":"L","page_count":10,"roc":113,"start":240},
     {"end":294,"kind":"L","page_count":40,"roc":113,"start":255},
@@ -38,9 +36,9 @@
     {"end":9,"kind":"O","page_count":10,"roc":115,"start":0},
     {"end":232,"kind":"O","page_count":218,"roc":115,"start":15}
   ],
-  "formal_covered_pages": 11672,
-  "formal_missing_pages": 1738,
-  "harvest_trigger_nonce": "20260913-v5.15-1p-132",
+  "formal_covered_pages": 11674,
+  "formal_missing_pages": 1736,
+  "harvest_trigger_nonce": "20260913-v5.16-1p-delta2",
   "lane_code": "P4-A",
   "required_pages": 13410,
   "schema": "p4a_formal_missing_live_v1",
