@@ -35,7 +35,7 @@ jobs:
           v5={(int(r['roc']),r['kind'],x) for r in p['runs'] for x in range(int(r['start']),int(r['end'])+1)}
           formal77={(96,'O',x) for x in range(50,100)} | {(98,'O',x) for x in range(75,100)} | {(98,'O',x) for x in range(125,127)}
           req=v5-formal77; assert len(req)==8348
-          pats={os.environ['PRE_RUN']:re.compile(r'^p4a-v5r-gap-ROC(\\d+)-([LO])-P(\\d+)-(\\d+)$'),os.environ['RUN20']:re.compile(r'^p4a-v5o2-gap-ROC(\\d+)-([LO])-P(\\d+)-(\\d+)$')}
+          pats={os.environ['PRE_RUN']:re.compile(r'^p4a-v5r-gap-ROC([0-9]+)-([LO])-P([0-9]+)-([0-9]+)$'),os.environ['RUN20']:re.compile(r'^p4a-v5o2-gap-ROC([0-9]+)-([LO])-P([0-9]+)-([0-9]+)$')}
           covered=set()
           for R,pat in pats.items():
             arts=[]
