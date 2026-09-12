@@ -1,0 +1,25 @@
+name: P2D FinHa public dataset route probe
+on:
+  push:
+    branches:
+      - p2d-free-broker-qual-20260912
+    paths:
+      - 'p2d/probe_finha_assets.py'
+      - '.github/workflows/p2d_finha_probe.yml'
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Probe FinHa public assets/routes
+        run: python p2d/probe_finha_assets.py
+      - name: Upload FinHa probe
+        uses: actions/upload-artifact@v4
+        with:
+          name: p2d-finha-public-probe
+          path: p2d_finha_probe/
+          if-no-files-found: error
+          retention-days: 14
