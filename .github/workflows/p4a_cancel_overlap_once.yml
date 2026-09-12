@@ -16,7 +16,7 @@ jobs:
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          for run in 34675954249 34671348649; do
+          for run in 34682152067; do
             echo "cancel $run"
             gh api --method POST "repos/$REPO/actions/runs/$run/cancel" || true
           done
