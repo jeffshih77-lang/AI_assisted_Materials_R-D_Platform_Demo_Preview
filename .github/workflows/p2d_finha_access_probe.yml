@@ -1,0 +1,25 @@
+name: P2D FinHa anonymous access probe
+on:
+  push:
+    branches:
+      - p2d-free-broker-qual-20260912
+    paths:
+      - 'p2d/probe_finha_access.py'
+      - '.github/workflows/p2d_finha_access_probe.yml'
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Probe anonymous API/object access
+        run: python p2d/probe_finha_access.py
+      - name: Upload access evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: p2d-finha-anonymous-access
+          path: p2d_finha_access/
+          if-no-files-found: error
+          retention-days: 14
