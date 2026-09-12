@@ -1,0 +1,24 @@
+name: W08 T59 pre-20050505 boundary probe v2
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/w08_t59_boundary_probe_v2.yml'
+  workflow_dispatch:
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run corrected exact-contract T59 probe
+        run: python3 w08_public_runner/w08_t59_boundary_probe_v2.py
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: w08-t59-boundary-probe-v2
+          path: w08_t59_boundary_probe_v2_out/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 6
