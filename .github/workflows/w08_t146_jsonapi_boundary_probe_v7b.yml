@@ -1,0 +1,73 @@
+name: W08 T146 JSON API boundary probe v7b
+on:
+  push:
+    branches: [w08-final-free-source-20260912]
+    paths:
+      - '.github/workflows/w08_t146_jsonapi_boundary_probe_v7b.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Probe boundary and market monthly slices
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import urllib.request,json,pathlib,hashlib,gzip,time,datetime,calendar
+          O=pathlib.Path('out_t146_v7b'); O.mkdir()
+          URL='https://mops.twse.com.tw/mops/api/t146sb10'; UA='Mozilla/5.0 (compatible; W08T146Boundary/7b)'
+          def sha(b): return hashlib.sha256(b).hexdigest()
+          def call(name,b):
+            rb=json.dumps(b,ensure_ascii=False,separators=(',',':')).encode(); (O/f'{name}.request.json').write_bytes(rb)
+            q=urllib.request.Request(URL,data=rb,method='POST',headers={'User-Agent':UA,'Accept':'application/json,*/*','Content-Type':'application/json','Origin':'https://mops.twse.com.tw','Referer':'https://mops.twse.com.tw/mops/#/web/t146sb10'})
+            err=None
+            for a in range(5):
+              try:
+                with urllib.request.urlopen(q,timeout=90) as r: raw=r.read(); st=r.status; break
+              except Exception as e:
+                err=repr(e)
+                if a==4: raise
+                time.sleep(2+a*2)
+            (O/f'{name}.response.bin').write_bytes(raw)
+            with open(O/f'{name}.response.bin.gz','wb') as f:
+              with gzip.GzipFile(filename='',fileobj=f,mode='wb',mtime=0) as z:z.write(raw)
+            try:p=json.loads(raw)
+            except:p={}
+            res=p.get('result') or []; rows=0; ds=[]
+            if isinstance(res,list):
+              for t in res:
+                if not isinstance(t,dict): continue
+                data=t.get('data') or []; rows += len(data) if isinstance(data,list) else 0
+                titles=t.get('titles') or []; idx=next((i for i,x in enumerate(titles) if isinstance(x,dict) and x.get('main')=='公告日期'),None)
+                if idx is not None and isinstance(data,list):
+                  for row in data:
+                    if isinstance(row,list) and idx<len(row): ds.append(str(row[idx]))
+            m={'case':name,'status':st,'request_bytes':len(rb),'request_sha256':sha(rb),'response_bytes':len(raw),'response_sha256':sha(raw),'api_code':p.get('code'),'api_message':p.get('message'),'tables':len(res) if isinstance(res,list) else 0,'rows':rows,'min_date':min(ds) if ds else None,'max_date':max(ds) if ds else None,'at':datetime.datetime.now(datetime.timezone.utc).isoformat()}
+            (O/f'{name}.meta.json').write_text(json.dumps(m,ensure_ascii=False,indent=2,sort_keys=True)+'\n'); print(json.dumps(m,ensure_ascii=False),flush=True); return m
+          def body(scope,company,market,first,last): return {'scopeType':scope,'companyId':company,'dateType':'1','firstDate':first,'lastDate':last,'marketKind':market,'announcementBasis':'0','dateRangeType':'','announcementType':'1','sort':'1'}
+          out=[]
+          # Earliest historical boundary: long-lived company 1101, exact full calendar years.
+          for y in range(85,95):
+            out.append(call(f'company_1101_{y:03d}',body('1','1101','sii',f'{y:03d}0101',f'{y:03d}1231'))); time.sleep(.4)
+          # Does market scope work when sliced monthly where whole-year gave 406?
+          for y in (93,100):
+            for month in (1,6,12):
+              last=calendar.monthrange(y+1911,month)[1]
+              for market in ('sii','otc','rotc','pub'):
+                out.append(call(f'market_{y:03d}_{month:02d}_{market}',body('2','',market,f'{y:03d}{month:02d}01',f'{y:03d}{month:02d}{last:02d}'))); time.sleep(.35)
+          verdict={'schema':'w08_t146_boundary_probe_v7b','endpoint':URL,'company_year_real':[x['case'] for x in out if x['case'].startswith('company_') and x.get('api_code')==200 and x.get('rows',0)>0],'market_month_real':[x['case'] for x in out if x['case'].startswith('market_') and x.get('api_code')==200 and x.get('rows',0)>0],'all':out}
+          (O/'VERDICT.json').write_text(json.dumps(verdict,ensure_ascii=False,indent=2,sort_keys=True)+'\n')
+          print('VERDICT',json.dumps({k:v for k,v in verdict.items() if k!='all'},ensure_ascii=False),flush=True)
+          PY
+      - name: Upload probe evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: W08_T146_JSONAPI_BOUNDARY_V7B_20260912
+          path: out_t146_v7b/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
