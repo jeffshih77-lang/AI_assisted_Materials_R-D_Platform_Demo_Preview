@@ -97,3 +97,5 @@ jobs:
           path: P4A-MATERIAL-ROC${{ matrix.roc }}-${{ matrix.kind }}-P*.zip
           if-no-files-found: error
           retention-days: 2
+
+# trigger: formal-drive-baseline-3771-exact-missing-9639-20260912
