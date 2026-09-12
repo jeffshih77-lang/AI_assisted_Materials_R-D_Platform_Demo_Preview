@@ -1,0 +1,142 @@
+name: P2A legacy static full-market formal v3
+
+on:
+  push:
+    branches: [p2a-transport-20260912]
+    paths: [.github/workflows/p2a_legacy_static_formal_v3_20260912.yml]
+
+permissions:
+  contents: write
+
+jobs:
+  capture:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: p2a-transport-20260912
+      - name: Capture official legacy static monthly revenue bytes
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf p2a_v3 && mkdir -p p2a_v3/raw p2a_v3/metadata p2a_v3/control p2a_v3/evidence p2a-results
+          python3 - <<'PY'
+          import collections,datetime as dt,hashlib,html as hm,json,os,pathlib,re,time,urllib.error,urllib.request,zipfile
+          OUT=pathlib.Path('p2a_v3'); RAW=OUT/'raw'; META=OUT/'metadata'; CTRL=OUT/'control'; EVID=OUT/'evidence'
+          MARKETS={'TWSE':'sii','TPEX':'otc'}; PRE=(85,1),(90,5); FORMAL=(90,6),(101,12)
+          BASE='https://mopsov.twse.com.tw/nas/t21/{code}/t21sc03_{y}_{m}.html'
+          ALT=['https://mopsov.twse.com.tw/nas/t21/{code}/t21sc03_{y}_{m}_0.html','https://mopsov.twse.com.tw/nas/t21/{code}/t21sc03_{y}_{m}_1.html']
+          UA='Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120 Safari/537.36'
+          def sha(b): return hashlib.sha256(b).hexdigest()
+          def months(a,b):
+            y,m=a
+            while (y,m)<=b:
+              yield y,m; m+=1
+              if m==13:y+=1;m=1
+          def text(b):
+            for e in ('big5','cp950'):
+              try:return b.decode(e),e
+              except UnicodeDecodeError:pass
+            return b.decode('cp950','replace'),'cp950-replace'
+          def clean(x): return hm.unescape(re.sub(r'<[^>]*>','',x)).replace('\xa0',' ').strip()
+          def validate(b):
+            if len(b)<1000:return {'valid':False,'classification':'NO_DATA_OR_TEMPLATE','encoding':None,'rows':0,'codes':0,'widths':[],'schema_family':None}
+            s,enc=text(b); title=('營業收入統計表' in s or '營業收入' in s)
+            codes=[]; widths=[]
+            for tr in re.findall(r'<tr\b[^>]*>([\s\S]*?)</tr>',s,re.I):
+              cs=[clean(x) for x in re.findall(r'<t[dh]\b[^>]*>([\s\S]*?)</t[dh]>',tr,re.I)]
+              c=next((x for x in cs[:4] if re.fullmatch(r'\d{4,6}',x)),None)
+              if c: codes.append(c); widths.append(len(cs))
+            ok=title and len(set(codes))>=5
+            uw=sorted(set(widths)); schema=None
+            if ok:
+              schema='MOPS_T21_LEGACY_HTML_V10' if max(uw or [0])<=10 else 'MOPS_T21_LEGACY_HTML_11COL_OR_LATER'
+            return {'valid':ok,'classification':'DATA' if ok else ('NO_COMPANY_ROWS' if title else 'NON_DATA_TEMPLATE'),'encoding':enc,'rows':len(codes),'codes':len(set(codes)),'widths':uw,'schema_family':schema}
+          def get(url,tries=4):
+            last=None
+            for i in range(tries):
+              at=dt.datetime.now(dt.timezone.utc).isoformat().replace('+00:00','Z')
+              try:
+                q=urllib.request.Request(url,headers={'User-Agent':UA,'Referer':'https://mopsov.twse.com.tw/','Accept':'text/html,*/*','Connection':'close'})
+                with urllib.request.urlopen(q,timeout=40) as r:b=r.read();return {'ok':True,'status':getattr(r,'status',200),'body':b,'headers':dict(r.headers.items()),'final':r.geturl(),'at':at}
+              except urllib.error.HTTPError as e:
+                b=e.read() if hasattr(e,'read') else b''
+                if e.code in (404,410):return {'ok':True,'status':e.code,'body':b,'headers':dict(e.headers.items()) if e.headers else {},'final':url,'at':at}
+                last=f'HTTP {e.code}'
+              except Exception as e:last=repr(e)
+              time.sleep(min(2,1.4**i))
+            return {'ok':False,'status':None,'body':b'','headers':{},'final':url,'at':at,'error':last}
+          boundary={}; observations=[]
+          for market,code in MARKETS.items():
+            vals=[]
+            for y,m in months(*PRE):
+              u=BASE.format(code=code,y=y,m=m);r=get(u,2);v=validate(r['body']) if r['ok'] and r['status']==200 else {'valid':False,'classification':'HTTP_NO_DATA' if r['status'] in (404,410) else 'TRANSPORT_ERROR','encoding':None,'rows':0,'codes':0,'widths':[],'schema_family':None}
+              rec={'market':market,'roc_year':y,'month':m,'route':'static_unsuffixed','url':u,'http_status':r['status'],'transport_ok':r['ok'],'bytes':len(r['body']),'sha256':sha(r['body']) if r['body'] else None,'retrieved_at':r['at'],**v};observations.append(rec)
+              if v['valid']: vals.append((y,m))
+            boundary[market]={'scan_start':'085-01','scan_end':'090-05','valid_pre_boundary_months':[f'{y:03d}-{m:02d}' for y,m in vals],'first_formal_candidate':'090-06'}
+          # Exclude alternative known official routes around the boundary. Dynamic ajax was separately exhausted in run 34691737106.
+          altobs=[]
+          for market,code in MARKETS.items():
+            for y,m in ((90,5),(90,6),(102,1)):
+              for tmpl in ALT:
+                u=tmpl.format(code=code,y=y,m=m);r=get(u,2);v=validate(r['body']) if r['ok'] and r['status']==200 else {'valid':False,'classification':'HTTP_NO_DATA' if r['status'] in (404,410) else 'TRANSPORT_ERROR','encoding':None,'rows':0,'codes':0,'widths':[],'schema_family':None}
+                altobs.append({'market':market,'roc_year':y,'month':m,'url':u,'http_status':r['status'],'bytes':len(r['body']),'sha256':sha(r['body']) if r['body'] else None,**v})
+          wus=[]; gaps=[]; rawfiles=0; payload_bytes=0; first={}
+          for market,code in MARKETS.items():
+            for y,m in months(*FORMAL):
+              u=BASE.format(code=code,y=y,m=m);r=get(u);v=validate(r['body']) if r['ok'] and r['status']==200 else {'valid':False,'classification':'HTTP_NO_DATA' if r['status'] in (404,410) else 'TRANSPORT_ERROR','encoding':None,'rows':0,'codes':0,'widths':[],'schema_family':None}
+              if not v['valid']:
+                gaps.append({'market':market,'roc_year':y,'month':m,'url':u,'http_status':r['status'],'bytes':len(r['body']),'sha256':sha(r['body']) if r['body'] else None,**v});continue
+              first.setdefault(market,(y,m));rd=RAW/market;md=META/market;rd.mkdir(exist_ok=True);md.mkdir(exist_ok=True)
+              rp=rd/f'{y:03d}_{m:02d}.response.html';rp.write_bytes(r['body']);rawfiles+=1;payload_bytes+=len(r['body'])
+              sf='MOPSOV_T21_LEGACY_HTML_V10_STATIC_UNSUFFIXED' if y<=98 else 'MOPSOV_T21_LEGACY_HTML_STATIC_UNSUFFIXED'
+              meta={'schema':'p2a_exact_http_capture_v3','dataset':'MONTHLY_REVENUE','work_unit_id':f'P2A-LEGACY-{market}-{y:03d}-{m:02d}','market':market,'roc_year':y,'month':m,'source_family':sf,'schema_family':v['schema_family'],'method':'GET','request_url':u,'final_url':r['final'],'retrieved_at':r['at'],'published_at':'unknown','available_at':'unknown','http_status':r['status'],'response_headers':r['headers'],'payload_bytes':len(r['body']),'payload_sha256':sha(r['body']),'encoding_detected':v['encoding'],'data_rows':v['rows'],'unique_company_codes':v['codes'],'row_widths':v['widths'],'classification':'FORMAL_RAW_CANDIDATE_PENDING_CLOUD_VERIFY','raw_semantics':'exact HTTP response body bytes; no transcode'}
+              mp=md/f'{y:03d}_{m:02d}.capture.json';mp.write_text(json.dumps(meta,ensure_ascii=False,indent=2,sort_keys=True)+'\n',encoding='utf-8')
+              wus.append({'work_unit_id':meta['work_unit_id'],'market':market,'roc_year':y,'month':m,'status':'RAW_CAPTURED_PENDING_CLOUD_VERIFY','source_family':sf,'schema_family':v['schema_family'],'payload_bytes':len(r['body']),'payload_sha256':sha(r['body']),'raw_path':str(rp.relative_to(OUT)),'metadata_path':str(mp.relative_to(OUT)),'rows':v['rows'],'unique_company_codes':v['codes']})
+              time.sleep(.025)
+          expected=139*2
+          if any(boundary[m]['valid_pre_boundary_months'] for m in MARKETS): gaps.append({'classification':'VALID_DATA_BEFORE_090-06','boundary':boundary})
+          if len(wus)!=expected: gaps.append({'classification':'FORMAL_WU_COUNT_MISMATCH','expected':expected,'actual':len(wus)})
+          # repeat first month exact bytes twice independently
+          rep=[]
+          for market,code in MARKETS.items():
+            u=BASE.format(code=code,y=90,m=6);a=get(u);time.sleep(.2);b=get(u)
+            rep.append({'market':market,'url':u,'sha_a':sha(a['body']) if a['body'] else None,'sha_b':sha(b['body']) if b['body'] else None,'identical':bool(a['body']) and a['body']==b['body']})
+            if not rep[-1]['identical']:gaps.append({'classification':'REPEATABILITY_FAIL','market':market})
+          coverage={m:{'dataset_historical_boundary':'090-06','gregorian_boundary':'2001-06','legacy_formal_end':'101-12','valid_legacy_months':sum(1 for x in wus if x['market']==m),'modern_csv_boundary':'102-01','latest_complete_month':'115-08'} for m in MARKETS}
+          status='PASS' if not gaps else 'FAIL_OPEN_ISSUES'
+          qual={'schema':'p2a_legacy_source_qualification_v3','status':status,'official_host':'mopsov.twse.com.tw','market_mapping':MARKETS,'legacy_unsuffixed_pattern':BASE,'boundary':boundary,'boundary_observations':observations,'alternative_static_boundary_observations':altobs,'dynamic_route_exhaustion_run_id':34691737106,'repeatability':rep,'coverage':coverage,'open_unclassified':gaps,'notes':['TWSE and TPEx independently qualified.','ROC90-06/2001-06 is the first full-market official legacy static month only if all earlier unsuffixed observations remain non-data and WU continuity passes.','Existing 328 modern CSV WUs are immutable and excluded from this package.']}
+          ledger={'schema':'p2a_legacy_work_unit_ledger_v3','status':'CAPTURED_PENDING_CLOUD_VERIFY' if status=='PASS' else 'OPEN','work_units':wus}
+          manifest={'schema':'p2a_legacy_manifest_v3','dataset':'MONTHLY_REVENUE','claimant_id':'P2-A-CHAT-20260912-1922','source_contract_version':'P2-A-SOURCE-CONTRACT-v2_PENDING_FINAL_FREEZE','coverage':coverage,'work_units':len(wus),'raw_payload_files':rawfiles,'payload_bytes':payload_bytes,'members':wus,'modern_immutable_package':{'drive_id':'1DhEmyWLvQCS3bA9zZri1QECyPpiKxuxB','sha256':'2087d70f2011552a7a6d12a931bdd3dd6df5fa62f9dbdf77bf5c1ed0509d4112','work_units':328,'rerun':False}}
+          anomaly={'schema':'p2a_legacy_anomaly_ledger_v3','pre_boundary_observations':observations,'alternative_route_observations':altobs,'capture_failures':gaps,'unclassified_true_gaps':gaps}
+          cov={'schema':'p2a_legacy_coverage_v3','status':'LEGACY_EXTENSION_CAPTURED_PENDING_CLOUD_VERIFY' if status=='PASS' else 'OPEN','coverage':coverage,'legacy_work_units':len(wus),'open_unclassified_true_gaps':len(gaps)}
+          for n,o in [('P2A_LEGACY_SOURCE_QUALIFICATION.json',qual),('P2A_LEGACY_WORK_UNIT_LEDGER.json',ledger),('P2A_LEGACY_MANIFEST.json',manifest),('P2A_LEGACY_ANOMALY_LEDGER.json',anomaly),('P2A_LEGACY_COVERAGE.json',cov)]: (CTRL/n).write_text(json.dumps(o,ensure_ascii=False,indent=2,sort_keys=True)+'\n',encoding='utf-8')
+          if status!='PASS':
+            pathlib.Path('p2a-results/p2a_legacy_static_v3_latest.json').write_text(json.dumps({'run_id':os.getenv('GITHUB_RUN_ID'),'status':status,'work_units':len(wus),'open_unclassified':gaps,'coverage':coverage},ensure_ascii=False,indent=2)+'\n');raise SystemExit('LEGACY_V3_QUALIFICATION_FAIL '+json.dumps(gaps,ensure_ascii=False))
+          pkg=OUT/'P2A_MONTHLY_REVENUE_FORMAL_RAW_LEGACY_200106_201212_20260912.zip';files=sorted(p for root in (RAW,META,CTRL) for p in root.rglob('*') if p.is_file())
+          with zipfile.ZipFile(pkg,'w',compression=zipfile.ZIP_DEFLATED,compresslevel=9) as zz:
+            for p in files:zz.write(p,p.relative_to(OUT).as_posix())
+          ph=sha(pkg.read_bytes());info={'schema':'p2a_legacy_package_info_v3','file_name':pkg.name,'bytes':pkg.stat().st_size,'sha256':ph,'member_count':len(files),'raw_payload_files':rawfiles,'work_units':len(wus),'formal_status':'PENDING_DRIVE_UPLOAD_READBACK'}
+          (OUT/'P2A_LEGACY_PACKAGE_INFO.json').write_text(json.dumps(info,ensure_ascii=False,indent=2,sort_keys=True)+'\n');(OUT/'SHA256SUMS_LEGACY.txt').write_text(f'{ph}  {pkg.name}\n')
+          pathlib.Path('p2a-results/p2a_legacy_static_v3_latest.json').write_text(json.dumps({'run_id':os.getenv('GITHUB_RUN_ID'),'status':'PASS','coverage':coverage,'work_units':len(wus),'raw_payload_files':rawfiles,'payload_bytes':payload_bytes,'package_file':pkg.name,'package_sha256':ph,'package_bytes':pkg.stat().st_size,'open_unclassified_gaps':0},ensure_ascii=False,indent=2,sort_keys=True)+'\n')
+          print(json.dumps({'status':'PASS','coverage':coverage,'work_units':len(wus),'package_sha256':ph,'bytes':pkg.stat().st_size},ensure_ascii=False))
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: P2A_LEGACY_STATIC_FORMAL_V3_20260912
+          path: p2a_v3/
+          if-no-files-found: warn
+          retention-days: 7
+      - name: Publish result pointer
+        if: always()
+        shell: bash
+        run: |
+          if [ -f p2a-results/p2a_legacy_static_v3_latest.json ]; then
+            git config user.name p2a-automation
+            git config user.email actions@users.noreply.github.com
+            git add p2a-results/p2a_legacy_static_v3_latest.json
+            git commit -m "P2-A legacy static v3 result $GITHUB_RUN_ID" || true
+            git push origin HEAD:p2a-transport-20260912
+          fi
