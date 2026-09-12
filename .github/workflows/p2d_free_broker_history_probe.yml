@@ -1,8 +1,5 @@
 name: P2D free broker history qualification probe
 on:
-  push:
-    branches:
-      - p2d-free-broker-qual-20260912
   workflow_dispatch:
 
 jobs:
