@@ -1,0 +1,35 @@
+name: W08 PRE20050505 formal v4 tail accelerator
+on:
+  push:
+    branches: [w08-final-free-source-20260912]
+    paths:
+      - '.github/workflows/w08_t59_pre20050505_formal_v4_tail.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  formal_tail:
+    strategy:
+      fail-fast: false
+      max-parallel: 16
+      matrix:
+        shard: [30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63]
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      SHARD: ${{ matrix.shard }}
+      SHARDS: 64
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: w08-final-free-source-20260912
+      - name: Capture official PRE20050505 tail units with frozen v4 UI click semantics
+        run: python3 w08_public_runner/w08_t59_pre20050505_formal_v4_tail.py
+      - name: Upload immutable tail shard evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: w08-t59-pre-v4-tail-${{ matrix.shard }}
+          path: out_t59_pre_v4_*/
+          if-no-files-found: error
+          retention-days: 7
