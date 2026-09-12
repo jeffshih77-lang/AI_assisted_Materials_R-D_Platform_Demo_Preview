@@ -1,0 +1,121 @@
+name: P4-A V5.4 incremental harvest 20p snapshot3 delta
+on:
+  push:
+    paths:
+      - '.github/workflows/p4a_v5_4_incremental_harvest_20p_snapshot3_delta.yml'
+permissions:
+  actions: read
+  contents: read
+jobs:
+  harvest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      SOURCE_RUN_ID: '34686421608'
+      SNAPSHOT1_ARTIFACT_ID: '10297147729'
+      SNAPSHOT2_ARTIFACT_ID: '10296483576'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Harvest only post-V5.4 successful artifacts without source requests
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p work/prev work/current_outer work/current_unpack drive_ready
+          for A in "$SNAPSHOT1_ARTIFACT_ID" "$SNAPSHOT2_ARTIFACT_ID"; do
+            curl -fL --retry 5 --retry-delay 2 -H "Authorization: Bearer $GH_TOKEN" -H 'X-GitHub-Api-Version: 2022-11-28' -o "work/prev/$A.zip" "https://api.github.com/repos/$REPO/actions/artifacts/$A/zip"
+            mkdir -p "work/prev/$A"; unzip -q "work/prev/$A.zip" -d "work/prev/$A"
+          done
+          gh api "repos/$REPO/actions/runs/$SOURCE_RUN_ID/artifacts?per_page=100" --paginate --slurp > work/current-artifact-pages.json
+          python - <<'PY'
+          import json,os,re,pathlib,hashlib,zipfile,subprocess
+          source_run=int(os.environ['SOURCE_RUN_ID'])
+          seen_ids=set(); expected=set(); s2_summary=None
+          for root in pathlib.Path('work/prev').iterdir():
+            if not root.is_dir(): continue
+            for parent in root.glob('*.zip'):
+              with zipfile.ZipFile(parent) as z:
+                if 'BUNDLE_INDEX.json' in z.namelist():
+                  idx=json.loads(z.read('BUNDLE_INDEX.json'))
+                  for e in idx['entries']: seen_ids.add(int(e['artifact_id']))
+            for js in root.glob('*SUMMARY*.json'):
+              d=json.loads(js.read_text())
+              if d.get('residual_after_delta_pages')==4093: s2_summary=d
+          assert len(seen_ids)==110, len(seen_ids)
+          assert s2_summary is not None
+          for r in s2_summary['residual_ranges']:
+            for p in range(int(r['start']),int(r['end'])+1): expected.add((int(r['roc']),r['kind'],p))
+          assert len(expected)==4093, len(expected)
+          arts=[]
+          for o in json.load(open('work/current-artifact-pages.json')): arts+=o.get('artifacts',[])
+          pat=re.compile(r'^p4a-v5o2-gap-ROC([0-9]+)-([LO])-P([0-9]+)-([0-9]+)$')
+          selected=[]
+          for a in arts:
+            m=pat.match(a.get('name',''))
+            if not m or a.get('expired') or int(a['id']) in seen_ids: continue
+            selected.append((a,int(m.group(1)),m.group(2),int(m.group(3)),int(m.group(4))))
+          selected.sort(key=lambda t:(t[1],t[2],t[3],t[4],t[0]['id']))
+          assert selected,'no delta artifacts'
+          covered=set(); entries=[]
+          for a,y,k,s,e in selected:
+            rng={(y,k,p) for p in range(s,e+1)}
+            assert rng<=expected,(a['name'],'outside V5.4 residual')
+            assert not (covered & rng),(a['name'],'duplicate delta coverage')
+            outer=pathlib.Path('work/current_outer')/f"artifact_{a['id']}.zip"
+            subprocess.run(['curl','-fL','--retry','5','--retry-delay','2','-H',f"Authorization: Bearer {os.environ['GH_TOKEN']}",'-H','X-GitHub-Api-Version: 2022-11-28','-o',str(outer),a['archive_download_url']],check=True)
+            ob=outer.read_bytes(); outer_sha=hashlib.sha256(ob).hexdigest(); dg=a.get('digest') or ''
+            if dg.startswith('sha256:'): assert outer_sha==dg.split(':',1)[1]
+            dest=pathlib.Path('work/current_unpack')/str(a['id']); dest.mkdir(parents=True,exist_ok=True)
+            with zipfile.ZipFile(outer) as z: z.extractall(dest)
+            childs=[p for p in dest.rglob('*.zip') if p.is_file()]; assert len(childs)==1
+            child=childs[0]; cb=child.read_bytes(); csha=hashlib.sha256(cb).hexdigest()
+            with zipfile.ZipFile(child) as z:
+              mans=[n for n in z.namelist() if n=='MANIFEST.json' or n.endswith('/MANIFEST.json')]; assert len(mans)==1
+              man=json.loads(z.read(mans[0]).decode('utf-8-sig'))
+            assert man['schema']=='p4a_material_info_page_chunk_v4'
+            c=man['coverage']; ass=man['assertions']; caps=man.get('captures',[]); anos=man.get('anomalies',[])
+            assert (int(c['roc_year']),c['kind'],int(c['start_page']),int(c['end_page']))==(y,k,s,e)
+            pc=e-s+1; assert int(ass['page_count'])==pc and int(ass['list_capture_count'])==pc
+            assert ass['all_http_200'] is True and ass['all_payload_nonempty'] is True
+            assert all(x.get('http_status')==200 and int(x.get('payload_bytes',0))>0 for x in caps)
+            assert int(ass['nonstandard_detail_count'])==len(anos)
+            assert all(x.get('disposition')=='PRESERVE_RAW_DO_NOT_ZERO_FILL' for x in anos)
+            stored=f"artifact_{a['id']}__{child.name}"
+            entries.append({'artifact_id':a['id'],'artifact_name':a['name'],'artifact_outer_sha256':outer_sha,'child_stored_name':stored,'child_original_name':child.name,'child_sha256':csha,'child_size':len(cb),'coverage':{'roc_year':y,'kind':k,'start_page':s,'end_page':e,'page_count':pc},'_child_path':str(child)})
+            covered|=rng
+          residual=expected-covered
+          def compress(keys):
+            out=[]; by={}
+            for y,k,p in sorted(keys): by.setdefault((y,k),[]).append(p)
+            for (y,k),ps in by.items():
+              st=pr=ps[0]
+              for p in ps[1:]:
+                if p==pr+1: pr=p
+                else: out.append({'roc':y,'kind':k,'start':st,'end':pr,'page_count':pr-st+1}); st=pr=p
+              out.append({'roc':y,'kind':k,'start':st,'end':pr,'page_count':pr-st+1})
+            return out
+          summary={'schema':'p4a_v5_4_20p_snapshot3_delta_harvest_summary_v1','lane_code':'P4-A','dataset':'MATERIAL_INFO','source_run_id':source_run,'source_requests_made_by_harvest':False,'formal_v5_4_expected_pages':4093,'delta_successful_pages':len(covered),'delta_successful_artifact_count':len(entries),'residual_after_delta_pages':len(residual),'residual_ranges':compress(residual)}
+          pathlib.Path('drive_ready/P4A_V5_4_20P_SNAPSHOT3_DELTA_HARVEST_SUMMARY.json').write_text(json.dumps(summary,ensure_ascii=False,indent=2,sort_keys=True)+'\n')
+          target=85*1024*1024; groups=[]; cur=[]; sz=0
+          for e in entries:
+            cs=int(e['child_size']); assert cs<target
+            if cur and sz+cs>target: groups.append(cur); cur=[]; sz=0
+            cur.append(e); sz+=cs
+          if cur: groups.append(cur)
+          for i,g in enumerate(groups,1):
+            clean=[{k:v for k,v in e.items() if k!='_child_path'} for e in g]
+            idx={'schema':'p4a_v5_4_20p_snapshot3_delta_drive_subbundle_index_v1','lane_code':'P4-A','dataset':'MATERIAL_INFO','source_run_id':source_run,'source_requests_made_by_harvest':False,'part':i,'part_count':len(groups),'artifact_count':len(g),'unique_page_count':sum(x['coverage']['page_count'] for x in clean),'entries':clean}
+            out=pathlib.Path('drive_ready')/f"P4A-V5.4-20P-SNAPSHOT3-DELTA-PART{i:03d}-RUN{source_run}.zip"
+            with zipfile.ZipFile(out,'w',compression=zipfile.ZIP_STORED) as z:
+              z.writestr('BUNDLE_INDEX.json',(json.dumps(idx,ensure_ascii=False,indent=2,sort_keys=True)+'\n').encode())
+              for e in g: z.write(e['_child_path'],e['child_stored_name'])
+            assert out.stat().st_size<100*1024*1024
+          print(json.dumps(summary,ensure_ascii=False,sort_keys=True)); print('drive_ready_parts',len(groups))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: p4a-v5-4-20p-snapshot3-delta-drive-ready
+          path: drive_ready/*
+          if-no-files-found: error
+          retention-days: 3
