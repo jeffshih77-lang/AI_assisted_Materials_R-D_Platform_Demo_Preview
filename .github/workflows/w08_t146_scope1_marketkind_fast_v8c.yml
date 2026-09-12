@@ -1,0 +1,38 @@
+name: W08 T146 scope1 marketKind fast v8c
+on:
+  push:
+    branches: [w08-final-free-source-20260912]
+    paths:
+      - '.github/workflows/w08_t146_scope1_marketkind_fast_v8c.yml'
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: w08-final-free-source-20260912
+      - name: Fast company-scope marketKind control
+        run: |
+          python3 - <<'PY'
+          import json,urllib.request,hashlib
+          U='https://mops.twse.com.tw/mops/api/t146sb10'; out=[]
+          for m in ['sii','otc','pub']:
+            d={'scopeType':'1','companyId':'3105','dateType':'1','firstDate':'1050101','lastDate':'1051231','marketKind':m,'announcementBasis':'0','dateRangeType':'','announcementType':'1','sort':'1','encodeURIComponent':1,'step':1,'firstin':1,'off':1}
+            b=json.dumps(d,separators=(',',':')).encode(); q=urllib.request.Request(U,data=b,method='POST',headers={'User-Agent':'Mozilla/5.0','Content-Type':'application/json','Accept':'application/json,*/*','Origin':'https://mops.twse.com.tw','Referer':'https://mops.twse.com.tw/mops/#/web/t146sb10'})
+            try:
+              with urllib.request.urlopen(q,timeout=25) as r: raw=r.read()
+              p=json.loads(raw); rows=[]
+              for g in p.get('result') or []:
+                if isinstance(g,dict): rows.extend(g.get('data') or [])
+              canonical=json.dumps(rows,ensure_ascii=False,separators=(',',':'),sort_keys=False).encode()
+              x={'marketKind':m,'api_code':p.get('code'),'rows':len(rows),'row_sha':hashlib.sha256(canonical).hexdigest(),'response_sha':hashlib.sha256(raw).hexdigest(),'bytes':len(raw)}
+            except Exception as e:x={'marketKind':m,'error':repr(e)}
+            out.append(x);print(json.dumps(x,ensure_ascii=False),flush=True)
+          good=[x for x in out if 'error' not in x]
+          same=len(good)==3 and len({x['api_code'] for x in good})==1 and len({x['rows'] for x in good})==1 and len({x['row_sha'] for x in good})==1
+          print('MARKETKIND_NONSEMANTIC='+str(same),flush=True)
+          if not same: raise SystemExit(2)
+          PY
