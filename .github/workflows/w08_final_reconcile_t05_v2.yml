@@ -1,0 +1,32 @@
+name: W08 T05 final reconcile v2
+on:
+  push:
+    branches: [w08-final-free-source-20260912]
+    paths:
+      - '.github/workflows/w08_final_reconcile_t05_v2.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  finalize_t05:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    env:
+      MODE: t05
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: w08-final-free-source-20260912
+      - name: Reconcile 621 immutable checkpoint refs plus exact remaining target
+        run: python3 w08_public_runner/w08_final_reconcile_v2.py
+      - name: Upload deterministic T05 remaining aggregate and final reference ledger
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: w08-final-t05-reference-aggregate-v2
+          path: out_w08_final_t05/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
