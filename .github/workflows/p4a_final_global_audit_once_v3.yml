@@ -1,0 +1,75 @@
+name: P4-A final exact global audit once v3
+on:
+  push:
+    paths:
+      - '.github/workflows/p4a_final_global_audit_once_v3.yml'
+  workflow_dispatch:
+permissions:
+  actions: read
+  contents: read
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Exact page-level audit v3
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          gh api "repos/$REPO/actions/artifacts?per_page=100" --paginate --slurp > artifacts-pages.json
+          python - <<'PY'
+          import json,re,collections
+          pc={81:{'L':1},82:{'L':17},83:{'L':23},84:{'L':28},85:{'L':51,'O':4},86:{'L':83,'O':10},87:{'L':120,'O':20},88:{'L':179,'O':34},89:{'L':225,'O':44},90:{'L':262,'O':72},91:{'L':365,'O':78},92:{'L':308,'O':77},93:{'L':298,'O':102},94:{'L':262,'O':109},95:{'L':214,'O':106},96:{'L':234,'O':118},97:{'L':258,'O':133},98:{'L':247,'O':127},99:{'L':271,'O':143},100:{'L':302,'O':153},101:{'L':275,'O':145},102:{'L':294,'O':160},103:{'L':296,'O':164},104:{'L':308,'O':175},105:{'L':305,'O':178},106:{'L':314,'O':175},107:{'L':328,'O':185},108:{'L':337,'O':191},109:{'L':358,'O':220},110:{'L':410,'O':249},111:{'L':381,'O':234},112:{'L':372,'O':236},113:{'L':425,'O':267},114:{'L':459,'O':287},115:{'L':371,'O':233}}
+          cov={(y,k):set() for y,ks in pc.items() for k in ks}; hits=collections.Counter(); accepted=[]; unexpected=[]
+          # Canonical legacy exceptions proven separately in Drive.
+          for p in range(4): cov[(85,'O')].add(p); hits[(85,'O',p)]+=1
+          for p in range(16): cov[(115,'L')].add(p); hits[(115,'L',p)]+=1
+          pats=[re.compile(x) for x in [
+            r'^p4a-material-info-ROC(\d+)-([LO])-P0*(\d+)-0*(\d+)-v4$',
+            r'^p4a-repair-ROC(\d+)-([LO])-P(\d+)-(\d+)-v4$',
+            r'^p4a-auto-repair-ROC(\d+)-([LO])-P(\d+)-(\d+)$',
+            r'^p4a-microrepair-ROC(\d+)-([LO])-P(\d+)-(\d+)$',
+            r'^p4a-auto-microrepair-ROC(\d+)-([LO])-P(\d+)-(\d+)$',
+            r'^p4a-final-ROC(\d+)-([LO])-P(\d+)$',
+            r'^p4a-targeted-final-ROC(\d+)-([LO])-P(\d+)$',
+            r'^p4a-gap-ROC(\d+)-([LO])-P(\d+)-(\d+)$']]
+          pages=[]
+          for obj in json.load(open('artifacts-pages.json')): pages += obj.get('artifacts',[])
+          for a in pages:
+            if a.get('expired'): continue
+            n=a.get('name','')
+            if n=='p4a-material-info-ROC115-L-p0014-p0015-public-runner-v4': y,k,s,e=115,'L',14,15
+            else:
+              m=next((p.match(n) for p in pats if p.match(n)),None)
+              if not m: continue
+              g=m.groups(); y=int(g[0]); k=g[1]; s=int(g[2]); e=int(g[3]) if len(g)>3 else s
+            if (y,k) not in cov or s<0 or e<s or e>=pc[y][k]:
+              unexpected.append({'id':a.get('id'),'name':n,'roc':y,'kind':k,'start':s,'end':e}); continue
+            accepted.append({'id':a.get('id'),'name':n,'digest':a.get('digest'),'size':a.get('size_in_bytes'),'roc':y,'kind':k,'start':s,'end':e})
+            for p in range(s,e+1): cov[(y,k)].add(p); hits[(y,k,p)]+=1
+          summaries=[]; missing=[]
+          for y,ks in pc.items():
+            for k,count in ks.items():
+              miss=sorted(set(range(count))-cov[(y,k)]); ranges=[]
+              if miss:
+                st=pr=miss[0]
+                for p in miss[1:]:
+                  if p==pr+1: pr=p
+                  else: ranges.append([st,pr]); st=pr=p
+                ranges.append([st,pr])
+              summaries.append({'roc':y,'kind':k,'required_pages':count,'covered_pages':len(cov[(y,k)]),'missing_pages':len(miss),'missing_ranges':ranges})
+              missing += [{'roc':y,'kind':k,'page':p} for p in miss]
+          required=sum(c for ks in pc.values() for c in ks.values()); covered=sum(len(v) for v in cov.values())
+          dups=[{'roc':y,'kind':k,'page':p,'evidence_count':c} for (y,k,p),c in sorted(hits.items()) if c>1]
+          out={'schema':'p4a_final_exact_global_audit_v3','required_pages':required,'covered_pages':covered,'missing_page_count':len(missing),'unexpected_artifact_count':len(unexpected),'duplicate_evidence_page_count':len(dups),'historical_base_complete_artifact_layer':required==13410 and covered==required and not missing and not unexpected,'summaries':summaries,'missing_pages':missing,'unexpected_artifacts':unexpected,'duplicate_evidence_pages':dups,'accepted_artifacts':accepted}
+          open('P4A_FINAL_EXACT_GLOBAL_AUDIT_V3.json','w').write(json.dumps(out,ensure_ascii=False,indent=2,sort_keys=True)+'\n')
+          print(json.dumps({k:out[k] for k in ('required_pages','covered_pages','missing_page_count','unexpected_artifact_count','duplicate_evidence_page_count','historical_base_complete_artifact_layer')},indent=2))
+          if required!=13410 or unexpected: raise SystemExit(3)
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: p4a-final-exact-global-audit-v3-${{ github.run_id }}
+          path: P4A_FINAL_EXACT_GLOBAL_AUDIT_V3.json
+          if-no-files-found: error
+          retention-days: 2
