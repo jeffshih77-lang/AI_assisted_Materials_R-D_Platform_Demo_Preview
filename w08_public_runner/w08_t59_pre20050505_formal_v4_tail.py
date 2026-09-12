@@ -21,23 +21,25 @@ def run_core_in_process():
     exec(compile(src,CORE_PATH,'exec'),{'__name__':'__main__'})
 
 def child(shard):
-    env=os.environ.copy(); env['SHARD']=str(shard); env['SHARDS']=str(SHARDS); env['TAIL_CHILD']='1'
+    env=os.environ.copy(); env['SHARD']=str(shard); env['SHARDS']=str(SHARDS); env['TAIL_CHILD']='1'; env.pop('BULK_STANDALONE',None)
     print(json.dumps({'bulk_child_start':shard}),flush=True)
     p=subprocess.run([sys.executable,__file__],env=env)
     print(json.dumps({'bulk_child_end':shard,'returncode':p.returncode}),flush=True)
     return shard,p.returncode
 
-def defer():
+def defer(reason,tag):
     root=pathlib.Path(f'out_t59_pre_v4_{SHARD:02d}_of_{SHARDS:02d}'); root.mkdir(parents=True,exist_ok=True)
-    (root/'DEFERRED_TO_STANDALONE_BULK.json').write_text(json.dumps({'formal_raw':False,'status':'DEFERRED_TO_STANDALONE_BULK','leader_shard':LEADER,'reason':'Standalone bulk leader owns all frozen deferred shards; this matrix job issues zero MOPS requests.'},sort_keys=True)+'\n')
-    print('DEFERRED_TO_STANDALONE_BULK_NO_REQUESTS',flush=True)
+    (root/f'{tag}.json').write_text(json.dumps({'formal_raw':False,'status':tag,'leader_shard':LEADER,'reason':reason},sort_keys=True)+'\n')
+    print(tag+'_NO_REQUESTS',flush=True)
     raise SystemExit(1)
 
 if os.environ.get('TAIL_CHILD')=='1':
     run_core_in_process()
-elif SHARD in BULK_SHARDS and not (SHARD==LEADER and STANDALONE):
-    defer()
-elif SHARD==LEADER and STANDALONE:
+elif STANDALONE:
+    defer('Original tail run shard63 is the unique bulk owner so its artifact remains visible to the already-running final reconciler. This standalone safety run issues zero MOPS requests.','DEFERRED_TO_ORIGINAL_TAIL_LEADER')
+elif SHARD in BULK_SHARDS and SHARD!=LEADER:
+    defer('This matrix job is owned by shard63 bulk leader and issues zero MOPS requests.','DEFERRED_TO_SHARD63_BULK')
+elif SHARD==LEADER:
     ensure_core()
     results=[]
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
