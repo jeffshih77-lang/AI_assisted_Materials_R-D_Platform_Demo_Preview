@@ -1,0 +1,54 @@
+name: P2-C TPEx legacy static file qualification q5
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/p2c_tpex_legacy_static_q5.yml
+
+permissions:
+  contents: read
+
+jobs:
+  qualify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Probe legacy static date files exact bytes
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import pathlib,subprocess,hashlib,json,datetime,re
+          out=pathlib.Path('out_p2c_tpex_legacy_q5'); out.mkdir()
+          dates=['920731','920801','920802','920803','920804','940101','951228','951229','951229']
+          base='https://hist.tpex.org.tw/Hist/STOCK/AFTERTRADING/PERATIO_ANALYSIS/RSTA3103_{}.HTML'
+          recs=[]
+          for i,d in enumerate(dates):
+            url=base.format(d); body=out/f'{i:02d}_{d}.body.bin'; hdr=out/f'{i:02d}_{d}.headers.txt'; err=out/f'{i:02d}_{d}.stderr.txt'
+            cmd=['curl','-k','-sS','-L','--connect-timeout','20','--max-time','60','-A','Mozilla/5.0 P2-C-Qualification/5.0','-D',str(hdr),'-o',str(body),'-w','%{http_code}',url]
+            r=subprocess.run(cmd,capture_output=True,text=True); err.write_text(r.stderr); b=body.read_bytes() if body.exists() else b''
+            best=None
+            for enc in ['cp950','big5','utf-8']:
+              t=b.decode(enc,errors='replace'); bad=t.count('�')
+              if best is None or bad<best[0]: best=(bad,enc,t)
+            _,enc,t=best
+            mdate=re.search(r'交易日期\s*[:：]?\s*([0-9]+)年([0-9]+)月([0-9]+)日',t)
+            # Count stock data rows by 5 TD body cells; exclude header by requiring first cell numeric.
+            rows=len(re.findall(r'<tr[^>]*>\s*<TD[^>]*>\s*\d{4,6}\s*</td>',t,re.I|re.S))
+            security='FOR SECURITY REASONS' in t.upper()
+            rec={'probe_index':i,'roc_date':d,'url':url,'http_code':int(r.stdout) if r.stdout.isdigit() else None,'curl_rc':r.returncode,'bytes':len(b),'sha256':hashlib.sha256(b).hexdigest(),'encoding':enc,'rows_hint':rows,'internal_date':('/'.join(mdate.groups()) if mdate else None),'security_page':security,'fetched_at_utc':datetime.datetime.now(datetime.timezone.utc).isoformat()}
+            recs.append(rec); print(json.dumps(rec,ensure_ascii=False))
+          repeat={'same_sha256':recs[-1]['sha256']==recs[-2]['sha256'],'same_bytes':recs[-1]['bytes']==recs[-2]['bytes'],'a':recs[-2]['sha256'],'b':recs[-1]['sha256']}
+          (out/'QUALIFICATION.json').write_text(json.dumps({'records':recs,'repeat_951229':repeat},ensure_ascii=False,indent=2)+'\n')
+          (out/'SHA256SUMS.txt').write_text(''.join(f'{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.name}\n' for p in sorted(out.glob('*.body.bin'))))
+          print('REPEAT',json.dumps(repeat))
+          PY
+      - name: Upload evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: p2c-tpex-legacy-static-q5
+          path: out_p2c_tpex_legacy_q5/
+          retention-days: 7
+          if-no-files-found: error
