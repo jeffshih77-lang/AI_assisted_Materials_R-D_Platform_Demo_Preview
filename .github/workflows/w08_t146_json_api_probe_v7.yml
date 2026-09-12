@@ -1,0 +1,28 @@
+name: W08 T146 JSON API probe v7
+on:
+  push:
+    branches: [w08-final-free-source-20260912]
+    paths:
+      - '.github/workflows/w08_t146_json_api_probe_v7.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: w08-final-free-source-20260912
+      - name: Probe current official T146 JSON API across historical years
+        run: python3 w08_public_runner/w08_t146_json_api_probe_v7.py
+      - name: Upload exact qualification evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: w08-t146-json-api-probe-v7
+          path: out_w08_t146_json_v7/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
