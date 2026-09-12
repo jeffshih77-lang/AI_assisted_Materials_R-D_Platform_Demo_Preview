@@ -1,0 +1,54 @@
+name: P2B direct official NAS XBRL probe
+
+on:
+  push:
+    branches: [p2b-financial-transport-20260912]
+    paths: [.github/workflows/p2b_xbrl_nas_probe.yml]
+
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Probe official NAS paths
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import urllib.request, urllib.error, pathlib, hashlib, json, zipfile, io
+          out=pathlib.Path('nas_probe'); out.mkdir(exist_ok=True)
+          periods=[(2013,1),(2019,2),(2025,4),(2026,2),(2026,3)]
+          pats=[
+            'https://mopsov.twse.com.tw/nas/ifrs/{y}/tifrs-{y}Q{q}.zip',
+            'https://mops.twse.com.tw/nas/ifrs/{y}/tifrs-{y}Q{q}.zip',
+            'https://mopsov.twse.com.tw/nas/ifrs/tifrs-{y}Q{q}.zip',
+            'https://mops.twse.com.tw/nas/ifrs/tifrs-{y}Q{q}.zip',
+          ]
+          rows=[]
+          for y,q in periods:
+            for i,p in enumerate(pats,1):
+              url=p.format(y=y,q=q)
+              try:
+                req=urllib.request.Request(url,headers={'User-Agent':'Mozilla/5.0 P2B-XBRL-NAS-qualification','Accept':'application/zip,*/*'})
+                with urllib.request.urlopen(req,timeout=60) as r: b=r.read(); st=r.status; h=dict(r.headers.items()); final=r.geturl(); err=None
+              except urllib.error.HTTPError as e: b=e.read(); st=e.code; h=dict(e.headers.items()) if e.headers else {}; final=url; err=repr(e)
+              except Exception as e: b=b''; st=None; h={}; final=url; err=repr(e)
+              iszip=b[:4]==b'PK\x03\x04'; names=[]; bad=None
+              if iszip:
+                try:
+                  with zipfile.ZipFile(io.BytesIO(b)) as z: names=z.namelist(); bad=z.testzip()
+                except Exception as e: bad=repr(e)
+              row={'year':y,'quarter':q,'variant':i,'url':url,'status':st,'bytes':len(b),'sha256':hashlib.sha256(b).hexdigest() if b else None,'is_zip':iszip,'members':len(names),'first_members':names[:12],'bad_member':bad,'content_type':h.get('Content-Type'),'final_url':final,'error':err,'head_hex':b[:32].hex(),'head_text':b[:300].decode('utf-8','replace')}
+              rows.append(row); (out/f'{y}Q{q}_v{i}.bin').write_bytes(b)
+              print(json.dumps({k:row[k] for k in ['year','quarter','variant','status','bytes','is_zip','members','bad_member','content_type','final_url','head_text']},ensure_ascii=False))
+          (out/'probe.json').write_text(json.dumps(rows,ensure_ascii=False,indent=2),encoding='utf-8')
+          PY
+      - name: Upload probe
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: P2B_XBRL_NAS_PROBE_20260912
+          path: nas_probe/
+          retention-days: 3
