@@ -1,0 +1,28 @@
+name: P2B nonajax quick
+on:
+  push:
+    branches: [p2b-financial-transport-20260912]
+    paths: [.github/workflows/p2b_nonajax_quick.yml]
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - shell: bash
+        run: |
+          python3 - <<'PY'
+          import urllib.request,urllib.parse,urllib.error,re,json,hashlib
+          f={'encodeURIComponent':'1','step':'1','firstin':'1','off':'1','TYPEK':'sii','year':'115','season':'02'}
+          for mode in ('POST','GET'):
+            u='https://mopsov.twse.com.tw/mops/web/t163sb04'
+            d=urllib.parse.urlencode(f).encode() if mode=='POST' else None
+            if mode=='GET':u+='?'+urllib.parse.urlencode(f)
+            try:
+              r=urllib.request.urlopen(urllib.request.Request(u,data=d,headers={'User-Agent':'Mozilla/5.0','Content-Type':'application/x-www-form-urlencoded','Referer':'https://mopsov.twse.com.tw/mops/web/t163sb04'}),timeout=12); b=r.read(); st=r.status
+            except Exception as e:
+              print(json.dumps({'mode':mode,'error':repr(e)}));continue
+            t=b.decode('utf-8','replace'); flat=re.sub(r'\s+',' ',re.sub(r'<[^>]+>',' ',t))
+            print(json.dumps({'mode':mode,'status':st,'bytes':len(b),'sha256':hashlib.sha256(b).hexdigest(),'company_code':'公司代號' in t,'eps':'基本每股盈餘' in t,'blocked':'FOR SECURITY REASONS' in t or '因為安全性考量' in t,'head':flat[:500]},ensure_ascii=False))
+          PY
