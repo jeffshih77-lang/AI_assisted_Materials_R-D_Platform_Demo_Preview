@@ -1,0 +1,82 @@
+name: P2B current financial source probe
+
+on:
+  push:
+    branches: [p2b-financial-transport-20260912]
+    paths: [.github/workflows/p2b_current_source_probe.yml]
+
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Probe current official financial sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import urllib.request, urllib.error, urllib.parse, pathlib, hashlib, json, re, csv, io, datetime as dt, time
+          OUT=pathlib.Path('current_probe'); OUT.mkdir(exist_ok=True)
+          ua='Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/140 Safari/537.36'
+          rows=[]
+          def get(url, referer=None):
+            h={'User-Agent':ua,'Accept':'text/html,application/xhtml+xml,application/xml,text/csv,*/*'}
+            if referer: h['Referer']=referer
+            try:
+              req=urllib.request.Request(url,headers=h)
+              with urllib.request.urlopen(req,timeout=90) as r: return r.status,r.read(),dict(r.headers.items()),r.geturl(),None
+            except urllib.error.HTTPError as e: return e.code,e.read(),dict(e.headers.items()) if e.headers else {},url,repr(e)
+            except Exception as e: return None,b'',{},url,repr(e)
+          def decode(b):
+            for enc in ('utf-8-sig','utf-8','cp950','big5'):
+              try:return b.decode(enc),enc
+              except UnicodeDecodeError: pass
+            return b.decode('utf-8','replace'),'replace'
+          def save(tag,b): (OUT/(tag+'.bin')).write_bytes(b)
+
+          # A currently cited official raw XBRL/HTML document service. Test TWSE and TPEx examples,
+          # old/mid/recent/future period and report-family A/B/C without assuming one ID works for all issuers.
+          companies=['2330','5274']
+          periods=[(2013,1),(2019,2),(2025,4),(2026,2),(2026,3)]
+          hosts=['mops.twse.com.tw','mopsov.twse.com.tw']
+          for host in hosts:
+            for co in companies:
+              for y,q in periods:
+                for rid in ['A','B','C']:
+                  url=f'https://{host}/server-java/t164sb01?step=1&CO_ID={co}&SYEAR={y}&SSEASON={q}&REPORT_ID={rid}'
+                  st,b,h,final,err=get(url,'https://mops.twse.com.tw/mops/web/t203sb01')
+                  tx,enc=decode(b); flat=re.sub(r'\s+',' ',re.sub(r'<[^>]+>',' ',tx))
+                  markers={k:(k in tx) for k in ['資產負債表','綜合損益表','現金流量表','每股盈餘','公司代號','會計師']}
+                  blocked=any(s in tx for s in ['FOR SECURITY REASONS','因為安全性考量','Access Denied','無法呈現'])
+                  nodata=any(s in re.sub(r'\s+','',tx) for s in ['查無資料','無符合條件之資料','無資料'])
+                  tag=f'xbrl_{host}_{co}_{y}Q{q}_{rid}'.replace('.','_'); save(tag,b)
+                  row={'kind':'XBRL_DOC','host':host,'company':co,'year':y,'quarter':q,'report_id':rid,'url':url,'status':st,'bytes':len(b),'sha256':hashlib.sha256(b).hexdigest() if b else None,'encoding':enc,'content_type':h.get('Content-Type'),'final_url':final,'markers':markers,'blocked':blocked,'no_data':nodata,'head_text':flat[:500],'error':err,'body_file':tag+'.bin'}
+                  rows.append(row)
+                  print(json.dumps({k:row[k] for k in ['host','company','year','quarter','report_id','status','bytes','blocked','no_data','markers','head_text']},ensure_ascii=False))
+                  time.sleep(.08)
+
+          # Official MOPS open-data snapshots for both listed/OTC. Capture exact bytes and inspect period fields.
+          for market in ['L','O']:
+            for code in ['t187ap06','t187ap14','t187ap17']:
+              url=f'https://mopsfin.twse.com.tw/opendata/{code}_{market}.csv'
+              st,b,h,final,err=get(url,'https://mopsfin.twse.com.tw/index')
+              tx,enc=decode(b)
+              lines=tx.splitlines(); header=lines[0] if lines else ''
+              sample=lines[1] if len(lines)>1 else ''
+              tag=f'opendata_{code}_{market}'; save(tag,b)
+              row={'kind':'OPEN_DATA','market':market,'dataset':code,'url':url,'status':st,'bytes':len(b),'sha256':hashlib.sha256(b).hexdigest() if b else None,'encoding':enc,'content_type':h.get('Content-Type'),'final_url':final,'line_count':len(lines),'header':header[:2000],'sample':sample[:2000],'error':err,'body_file':tag+'.bin'}
+              rows.append(row)
+              print(json.dumps({k:row[k] for k in ['market','dataset','status','bytes','encoding','line_count','header','sample']},ensure_ascii=False))
+              time.sleep(.1)
+          (OUT/'probe.json').write_text(json.dumps(rows,ensure_ascii=False,indent=2),encoding='utf-8')
+          PY
+      - name: Upload current-source probe
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: P2B_CURRENT_SOURCE_PROBE_20260912
+          path: current_probe/
+          if-no-files-found: error
+          retention-days: 3
