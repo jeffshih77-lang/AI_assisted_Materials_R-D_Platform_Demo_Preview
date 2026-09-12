@@ -1,0 +1,30 @@
+name: W08 PRE final scope reconcile v1
+on:
+  push:
+    branches: [w08-final-free-source-20260912]
+    paths: ['.github/workflows/w08_pre_final_scope_reconcile_v1.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  finalize:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: w08-final-free-source-20260912
+          fetch-depth: 0
+      - name: Reconcile corrected company universe and build full deterministic PRE RAW
+        run: python3 w08_public_runner/w08_pre_final_scope_reconcile_v1.py
+      - name: Upload PRE full final RAW and exclusion evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: W08_PRE_COMPANY_SCOPE_FINAL_20260912
+          path: out_w08_pre_final_scope/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
