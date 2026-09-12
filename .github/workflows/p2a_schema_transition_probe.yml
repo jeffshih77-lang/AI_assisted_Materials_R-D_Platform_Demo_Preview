@@ -1,0 +1,65 @@
+name: P2A MOPS schema transition probe
+
+on:
+  push:
+    branches: [p2a-transport-20260912]
+    paths: [.github/workflows/p2a_schema_transition_probe.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - name: Map official archive schema transitions
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          python3 - <<'PY'
+          import urllib.request, urllib.error, hashlib, json, datetime as dt, time, re
+          markets={'TWSE':'sii','TPEX':'otc'}
+          samples=[(90,5),(90,6),(101,12),(102,1),(102,12),(103,1),(103,12),(104,1),(104,12),(105,1),(115,8),(115,9)]
+          patterns={
+            'HTML_UNSUFFIXED':'https://mopsov.twse.com.tw/nas/t21/{code}/t21sc03_{y}_{m}.html',
+            'HTML_0':'https://mopsov.twse.com.tw/nas/t21/{code}/t21sc03_{y}_{m}_0.html',
+            'HTML_1':'https://mopsov.twse.com.tw/nas/t21/{code}/t21sc03_{y}_{m}_1.html',
+            'CSV':'https://mopsov.twse.com.tw/nas/t21/{code}/t21sc03_{y}_{m}.csv'}
+          def decode_lossy(b):
+            for enc in ('cp950','big5','utf-8-sig','utf-8'):
+              try:return b.decode(enc),enc
+              except UnicodeDecodeError:pass
+            return b.decode('cp950','replace'),'cp950-replace'
+          def valid_data(kind,b,status):
+            if status!=200 or len(b)<500:return False,None,None
+            text,enc=decode_lossy(b); low=text.lower()
+            has_code=bool(re.search(r'(?:>|,|\")\s*\d{4,6}\s*(?:<|,|\")', text))
+            has_rev=('營收' in text or '營業收入' in text)
+            if kind.startswith('HTML'): ok=('<html' in low or '<table' in low) and has_code and has_rev
+            else: ok=has_code and has_rev and not ('<html' in low[:500])
+            return ok,enc,has_code
+          rows=[]
+          for market,code in markets.items():
+            for y,m in samples:
+              for kind,p in patterns.items():
+                u=p.format(code=code,y=y,m=m)
+                try:
+                  req=urllib.request.Request(u,headers={'User-Agent':'Mozilla/5.0 (compatible; P2A/1.0)','Referer':'https://mopsov.twse.com.tw/','Accept':'*/*'})
+                  with urllib.request.urlopen(req,timeout=30) as r:b=r.read();st=getattr(r,'status',200)
+                  ok,enc,has_code=valid_data(kind,b,st)
+                  rows.append({'market':market,'roc_year':y,'month':m,'kind':kind,'url':u,'status':st,'bytes':len(b),'sha256':hashlib.sha256(b).hexdigest() if b else None,'valid_data':ok,'encoding':enc,'has_code_row':has_code})
+                except Exception as e:
+                  rows.append({'market':market,'roc_year':y,'month':m,'kind':kind,'url':u,'valid_data':False,'error':repr(e)})
+                time.sleep(.04)
+          doc={'generated_at':dt.datetime.now(dt.timezone.utc).isoformat(),'rows':rows}
+          open('out/P2A_SCHEMA_TRANSITION_PROBE.json','w',encoding='utf-8').write(json.dumps(doc,ensure_ascii=False,indent=2)+'\n')
+          print(json.dumps(doc,ensure_ascii=False))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: P2A_SCHEMA_TRANSITION_PROBE
+          path: out/
+          if-no-files-found: error
+          retention-days: 7
