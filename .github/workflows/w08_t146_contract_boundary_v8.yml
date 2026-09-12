@@ -1,0 +1,99 @@
+name: W08 T146 contract boundary v8
+on:
+  push:
+    branches: [w08-final-free-source-20260912]
+    paths:
+      - '.github/workflows/w08_t146_contract_boundary_v8.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  boundary:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: w08-final-free-source-20260912
+      - name: Validate year encoding and segment boundaries
+        shell: bash
+        run: |
+          mkdir -p out_w08_t146_boundary_v8
+          python3 - <<'PY'
+          import json,urllib.request,pathlib,hashlib,gzip,re,time,datetime as dt
+          O=pathlib.Path('out_w08_t146_boundary_v8'); U='https://mops.twse.com.tw/mops/api/t146sb10'
+          UA='Mozilla/5.0 (compatible; W08T146Boundary/8.0)'
+          def h(b):return hashlib.sha256(b).hexdigest()
+          def dates_rows(p):
+            rows=[]; dates=[]
+            result=p.get('result') if isinstance(p,dict) else None
+            if not isinstance(result,list): return rows,dates
+            for g in result:
+              if not isinstance(g,dict): continue
+              titles=g.get('titles') or []; data=g.get('data') or []; header=str(g.get('header',''))
+              mains=[str(x.get('main','')) if isinstance(x,dict) else str(x) for x in titles]
+              try: di=mains.index('公告日期')
+              except ValueError: di=None
+              for r in data:
+                if not isinstance(r,list): continue
+                fp=h(json.dumps([header,mains,r],ensure_ascii=False,separators=(',',':'),sort_keys=False).encode())
+                rows.append(fp)
+                if di is not None and di<len(r):
+                  s=str(r[di]).strip()
+                  if re.fullmatch(r'\d{1,3}/\d{1,2}/\d{1,2}',s): dates.append(s)
+            return rows,dates
+          def req(label,year,market,first,last,scope='2',company=''):
+            b={'scopeType':scope,'companyId':company,'dateType':'1','firstDate':first,'lastDate':last,'marketKind':market,'announcementBasis':'0','dateRangeType':'','announcementType':'1','sort':'1','encodeURIComponent':1,'step':1,'firstin':1,'off':1}
+            rawb=json.dumps(b,separators=(',',':'),ensure_ascii=False).encode(); (O/f'{label}.request.json').write_bytes(rawb)
+            q=urllib.request.Request(U,data=rawb,method='POST',headers={'User-Agent':UA,'Accept':'application/json,*/*','Content-Type':'application/json','Origin':'https://mops.twse.com.tw','Referer':'https://mops.twse.com.tw/mops/#/web/t146sb10'})
+            last_err=None
+            for a in range(1,4):
+              try:
+                with urllib.request.urlopen(q,timeout=90) as x: rb=x.read(); st=x.status
+                break
+              except Exception as e:
+                last_err=repr(e)
+                if a==3: return {'label':label,'year':year,'market':market,'first':first,'last':last,'error':last_err}
+                time.sleep(a*2)
+            (O/f'{label}.response.bin').write_bytes(rb)
+            with gzip.GzipFile(O/f'{label}.response.bin.gz','wb',mtime=0) as g:g.write(rb)
+            p=json.loads(rb.decode()); rows,ds=dates_rows(p)
+            yrstr=str(year)
+            outyr=[d for d in ds if int(d.split('/')[0])!=year]
+            rec={'label':label,'year':year,'market':market,'first':first,'last':last,'scopeType':scope,'companyId':company,'http':st,'api_code':p.get('code'),'api_message':p.get('message'),'response_bytes':len(rb),'response_sha256':h(rb),'gzip_roundtrip':gzip.decompress((O/f'{label}.response.bin.gz').read_bytes())==rb,'row_count':len(rows),'row_fingerprints':rows,'date_count':len(ds),'min_date':min(ds,default=None),'max_date':max(ds,default=None),'out_of_requested_year_dates':outyr[:50],'out_of_requested_year_count':len(outyr)}
+            print(json.dumps({k:v for k,v in rec.items() if k!='row_fingerprints'},ensure_ascii=False),flush=True); return rec
+          records=[]
+          # Year encoding: public example uses unpadded ROC integer; compare against zero-padded form used in v7.
+          for y in [90,93,94,95,100,105,106]:
+            for m in ['sii','pub']:
+              records.append(req(f'unpad_y{y}_{m}',y,m,f'{y}0101',f'{y+1}0101'))
+              records.append(req(f'pad_y{y}_{m}',y,m,f'{y:03d}0101',f'{y+1:03d}0101'))
+          # Boundary: compare next-Jan-1 against same-year Dec-31 with unpadded canonical year representation.
+          for y in [90,94,106]:
+            for m in ['sii','pub']:
+              records.append(req(f'dec31_y{y}_{m}',y,m,f'{y}0101',f'{y}1231'))
+          # Known historical company check: 1101 has separate W08 historical evidence in ROC93.
+          records.append(req('company_1101_y93_scope1',93,'sii','930101','931231',scope='1',company='1101'))
+          records.append(req('company_1101_y94_scope1',94,'sii','940101','941231',scope='1',company='1101'))
+          by={r['label']:r for r in records}
+          comparisons=[]
+          def comp(a,b,kind):
+            A=by[a];B=by[b]; sa=set(A.get('row_fingerprints',[]));sb=set(B.get('row_fingerprints',[])); comparisons.append({'kind':kind,'a':a,'b':b,'a_rows':len(sa),'b_rows':len(sb),'intersection':len(sa&sb),'a_only':len(sa-sb),'b_only':len(sb-sa),'identical_sets':sa==sb})
+          for y in [90,93,94,95,100,105,106]:
+            for m in ['sii','pub']: comp(f'unpad_y{y}_{m}',f'pad_y{y}_{m}','year_encoding')
+          for y in [90,94,106]:
+            for m in ['sii','pub']: comp(f'unpad_y{y}_{m}',f'dec31_y{y}_{m}','end_boundary')
+          summary={'schema':'w08_t146_contract_boundary_v8','endpoint':U,'records':[ {k:v for k,v in r.items() if k!='row_fingerprints'} for r in records],'comparisons':comparisons,'assertions':{'all_valid_transport':all(r.get('http')==200 for r in records if 'error' not in r),'all_gzip_roundtrip':all(r.get('gzip_roundtrip',False) for r in records if 'error' not in r),'no_out_of_year_dates':all(r.get('out_of_requested_year_count',0)==0 for r in records if 'error' not in r),'company_1101_93_has_data':by['company_1101_y93_scope1'].get('row_count',0)>0},'generated_at':dt.datetime.now(dt.timezone.utc).isoformat()}
+          (O/'BOUNDARY.json').write_text(json.dumps(summary,ensure_ascii=False,indent=2,sort_keys=True)+'\n')
+          print(json.dumps(summary['assertions'],ensure_ascii=False,indent=2),flush=True)
+          print(json.dumps(comparisons,ensure_ascii=False,indent=2),flush=True)
+          PY
+      - name: Upload boundary evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: w08-t146-contract-boundary-v8
+          path: out_w08_t146_boundary_v8/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
