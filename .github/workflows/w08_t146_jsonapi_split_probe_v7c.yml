@@ -1,0 +1,38 @@
+name: W08 T146 JSON API split probe v7c
+on:
+  push:
+    branches: [w08-final-free-source-20260912]
+    paths: ['.github/workflows/w08_t146_jsonapi_split_probe_v7c.yml']
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Verify single-day fallback for a month-level false negative
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import urllib.request,json,hashlib,pathlib,gzip,datetime
+          O=pathlib.Path('out_v7c');O.mkdir(); U='https://mops.twse.com.tw/mops/api/t146sb10'
+          def go(name,a,b):
+            body={'scopeType':'2','companyId':'','dateType':'1','firstDate':a,'lastDate':b,'marketKind':'sii','announcementBasis':'0','dateRangeType':'','announcementType':'1','sort':'1'}
+            qb=json.dumps(body,separators=(',',':')).encode();(O/f'{name}.request.json').write_bytes(qb)
+            req=urllib.request.Request(U,data=qb,method='POST',headers={'User-Agent':'Mozilla/5.0 W08T146Split/7c','Content-Type':'application/json','Accept':'application/json,*/*','Origin':'https://mops.twse.com.tw','Referer':'https://mops.twse.com.tw/mops/#/web/t146sb10'})
+            with urllib.request.urlopen(req,timeout=60) as r: raw=r.read(); st=r.status
+            (O/f'{name}.response.bin').write_bytes(raw)
+            p=json.loads(raw); rows=sum(len(x.get('data') or []) for x in (p.get('result') or []) if isinstance(x,dict))
+            m={'case':name,'status':st,'code':p.get('code'),'message':p.get('message'),'rows':rows,'bytes':len(raw),'request_sha256':hashlib.sha256(qb).hexdigest(),'response_sha256':hashlib.sha256(raw).hexdigest()};print(json.dumps(m,ensure_ascii=False));return m
+          # Month is known false-negative while company 1101 has a 100/01/21 record.
+          out=[go('month','1000101','1000131'),go('week','1000117','1000123'),go('day_0121','1000121','1000121')]
+          pathlib.Path(O/'VERDICT.json').write_text(json.dumps(out,ensure_ascii=False,indent=2)+'\n')
+          if not any(x['case']!='month' and x['code']==200 and x['rows']>0 for x in out): raise SystemExit('adaptive split not qualified')
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: W08_T146_JSONAPI_SPLIT_V7C_20260912
+          path: out_v7c/
+          retention-days: 7
+          compression-level: 0
