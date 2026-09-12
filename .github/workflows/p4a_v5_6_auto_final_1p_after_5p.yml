@@ -1,0 +1,254 @@
+name: P4-A V5.6 auto final 1p after 5p
+on:
+  workflow_run:
+    workflows: ['P4-A V5.2 auto residual 5p after 20p']
+    types: [completed]
+permissions:
+  actions: read
+  contents: read
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      has_work: ${{ steps.p.outputs.has_work }}
+      m1: ${{ steps.p.outputs.m1 }}
+      m2: ${{ steps.p.outputs.m2 }}
+      m3: ${{ steps.p.outputs.m3 }}
+      m4: ${{ steps.p.outputs.m4 }}
+      m5: ${{ steps.p.outputs.m5 }}
+      m6: ${{ steps.p.outputs.m6 }}
+      m7: ${{ steps.p.outputs.m7 }}
+      m8: ${{ steps.p.outputs.m8 }}
+      m9: ${{ steps.p.outputs.m9 }}
+      m10: ${{ steps.p.outputs.m10 }}
+      m11: ${{ steps.p.outputs.m11 }}
+      m12: ${{ steps.p.outputs.m12 }}
+      m13: ${{ steps.p.outputs.m13 }}
+      m14: ${{ steps.p.outputs.m14 }}
+      m15: ${{ steps.p.outputs.m15 }}
+      m16: ${{ steps.p.outputs.m16 }}
+      residual_pages: ${{ steps.p.outputs.residual_pages }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      PRE_RUN: '34685616731'
+      RUN20: '34686421608'
+      RUN5: ${{ github.event.workflow_run.id }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: p
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUN5" = '34691917746'
+          for R in "$PRE_RUN" "$RUN20" "$RUN5"; do
+            gh api "repos/$REPO/actions/runs/$R/artifacts?per_page=100" --paginate --slurp > "arts-$R.json"
+          done
+          python - <<'PY'
+          import json,re,os
+          p=json.load(open('p4a_runner/P4A_EXACT_MISSING_PLAN_V5_20260912.json'))
+          v5={(int(r['roc']),r['kind'],x) for r in p['runs'] for x in range(int(r['start']),int(r['end'])+1)}
+          formal77={(96,'O',x) for x in range(50,100)} | {(98,'O',x) for x in range(75,100)} | {(98,'O',x) for x in range(125,127)}
+          req=v5-formal77; assert len(req)==8348
+          pats={
+            os.environ['PRE_RUN']:re.compile(r'^p4a-v5r-gap-ROC([0-9]+)-([LO])-P([0-9]+)-([0-9]+)$'),
+            os.environ['RUN20']:re.compile(r'^p4a-v5o2-gap-ROC([0-9]+)-([LO])-P([0-9]+)-([0-9]+)$'),
+            os.environ['RUN5']:re.compile(r'^p4a-v5r5-gap-ROC([0-9]+)-([LO])-P([0-9]+)-([0-9]+)$')
+          }
+          covered=set()
+          for R,pat in pats.items():
+            arts=[]
+            for o in json.load(open(f'arts-{R}.json')): arts+=o.get('artifacts',[])
+            for a in arts:
+              if a.get('expired'): continue
+              m=pat.match(a.get('name',''))
+              if not m: continue
+              y,k,s,e=int(m.group(1)),m.group(2),int(m.group(3)),int(m.group(4))
+              q={(y,k,x) for x in range(s,e+1)}
+              assert q<=req,(R,a['name'],'outside V5 exact plan')
+              covered|=q
+          residual=sorted(req-covered)
+          items=[{'roc':y,'kind':k,'start':x,'end':x,'pages':1} for y,k,x in residual]
+          groups=[items[i::16] for i in range(16)]
+          assert all(len(g)<=256 for g in groups),(len(items),[len(g) for g in groups])
+          out=os.environ['GITHUB_OUTPUT']
+          with open(out,'a') as f:
+            f.write(f"has_work={'true' if residual else 'false'}\n")
+            f.write(f"residual_pages={len(residual)}\n")
+            for i,g in enumerate(groups,1):
+              f.write(f"m{i}="+json.dumps({'include':g},separators=(',',':'))+'\n')
+          print({'covered':len(covered),'residual_pages':len(residual),'groups':[len(g) for g in groups]})
+          PY
+  c1:
+    needs: plan
+    if: ${{ needs.plan.outputs.has_work == 'true' }}
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix: "${{ fromJson(needs.plan.outputs.m1) }}"
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      ROC_YEAR: "${{ matrix.roc }}"
+      KIND: "${{ matrix.kind }}"
+      START_PAGE: "${{ matrix.start }}"
+      END_PAGE: "${{ matrix.end }}"
+      DETAIL_WORKERS: '1'
+    steps: &steps
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - name: Capture final exact one-page residual
+        shell: bash
+        run: |
+          cp p4a_runner/p4a_material_info_page_chunk_v4.py /tmp/p4a.py
+          sed -i 's/def get(url, retries=3):/def get(url, retries=20):/' /tmp/p4a.py
+          python /tmp/p4a.py
+      - name: Validate and package immutable V4 RAW
+        shell: bash
+        run: |
+          python - <<'PY'
+          import pathlib,json,zipfile,os
+          roots=[p for p in pathlib.Path('out_p4a_chunk').iterdir() if p.is_dir()];assert len(roots)==1
+          root=roots[0]; mans=list(root.rglob('MANIFEST.json'));assert len(mans)==1
+          m=json.loads(mans[0].read_text(encoding='utf-8-sig'));c=m['coverage'];a=m['assertions'];caps=m.get('captures',[]);anos=m.get('anomalies',[])
+          s=int(os.environ['START_PAGE']);e=int(os.environ['END_PAGE']);pc=e-s+1
+          assert pc==1
+          assert m['schema']=='p4a_material_info_page_chunk_v4'
+          assert (int(c['roc_year']),c['kind'],int(c['start_page']),int(c['end_page']))==(int(os.environ['ROC_YEAR']),os.environ['KIND'],s,e)
+          assert int(a['page_count'])==1 and int(a['list_capture_count'])==1
+          assert a['all_http_200'] is True and a['all_payload_nonempty'] is True
+          assert all(x.get('http_status')==200 and int(x.get('payload_bytes',0))>0 for x in caps)
+          assert int(a['nonstandard_detail_count'])==len(anos)
+          assert all(x.get('disposition')=='PRESERVE_RAW_DO_NOT_ZERO_FILL' for x in anos)
+          out=pathlib.Path(root.name+'.zip')
+          with zipfile.ZipFile(out,'w',zipfile.ZIP_DEFLATED) as z:
+            for p in sorted(root.rglob('*')):
+              if p.is_file(): z.write(p,p.relative_to(root.parent))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: p4a-v5r1-gap-ROC${{ matrix.roc }}-${{ matrix.kind }}-P${{ matrix.start }}
+          path: P4A-MATERIAL-ROC*.zip
+          if-no-files-found: error
+          retention-days: 3
+  c2:
+    needs: plan
+    if: ${{ needs.plan.outputs.has_work == 'true' }}
+    strategy: { fail-fast: false, max-parallel: 4, matrix: "${{ fromJson(needs.plan.outputs.m2) }}" }
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env: { ROC_YEAR: "${{ matrix.roc }}", KIND: "${{ matrix.kind }}", START_PAGE: "${{ matrix.start }}", END_PAGE: "${{ matrix.end }}", DETAIL_WORKERS: '1' }
+    steps: *steps
+  c3:
+    needs: plan
+    if: ${{ needs.plan.outputs.has_work == 'true' }}
+    strategy: { fail-fast: false, max-parallel: 4, matrix: "${{ fromJson(needs.plan.outputs.m3) }}" }
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env: { ROC_YEAR: "${{ matrix.roc }}", KIND: "${{ matrix.kind }}", START_PAGE: "${{ matrix.start }}", END_PAGE: "${{ matrix.end }}", DETAIL_WORKERS: '1' }
+    steps: *steps
+  c4:
+    needs: plan
+    if: ${{ needs.plan.outputs.has_work == 'true' }}
+    strategy: { fail-fast: false, max-parallel: 4, matrix: "${{ fromJson(needs.plan.outputs.m4) }}" }
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env: { ROC_YEAR: "${{ matrix.roc }}", KIND: "${{ matrix.kind }}", START_PAGE: "${{ matrix.start }}", END_PAGE: "${{ matrix.end }}", DETAIL_WORKERS: '1' }
+    steps: *steps
+  c5:
+    needs: [plan, c1, c2, c3, c4]
+    if: ${{ always() && needs.plan.outputs.has_work == 'true' }}
+    strategy: { fail-fast: false, max-parallel: 4, matrix: "${{ fromJson(needs.plan.outputs.m5) }}" }
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env: { ROC_YEAR: "${{ matrix.roc }}", KIND: "${{ matrix.kind }}", START_PAGE: "${{ matrix.start }}", END_PAGE: "${{ matrix.end }}", DETAIL_WORKERS: '1' }
+    steps: *steps
+  c6:
+    needs: [plan, c1, c2, c3, c4]
+    if: ${{ always() && needs.plan.outputs.has_work == 'true' }}
+    strategy: { fail-fast: false, max-parallel: 4, matrix: "${{ fromJson(needs.plan.outputs.m6) }}" }
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env: { ROC_YEAR: "${{ matrix.roc }}", KIND: "${{ matrix.kind }}", START_PAGE: "${{ matrix.start }}", END_PAGE: "${{ matrix.end }}", DETAIL_WORKERS: '1' }
+    steps: *steps
+  c7:
+    needs: [plan, c1, c2, c3, c4]
+    if: ${{ always() && needs.plan.outputs.has_work == 'true' }}
+    strategy: { fail-fast: false, max-parallel: 4, matrix: "${{ fromJson(needs.plan.outputs.m7) }}" }
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env: { ROC_YEAR: "${{ matrix.roc }}", KIND: "${{ matrix.kind }}", START_PAGE: "${{ matrix.start }}", END_PAGE: "${{ matrix.end }}", DETAIL_WORKERS: '1' }
+    steps: *steps
+  c8:
+    needs: [plan, c1, c2, c3, c4]
+    if: ${{ always() && needs.plan.outputs.has_work == 'true' }}
+    strategy: { fail-fast: false, max-parallel: 4, matrix: "${{ fromJson(needs.plan.outputs.m8) }}" }
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env: { ROC_YEAR: "${{ matrix.roc }}", KIND: "${{ matrix.kind }}", START_PAGE: "${{ matrix.start }}", END_PAGE: "${{ matrix.end }}", DETAIL_WORKERS: '1' }
+    steps: *steps
+  c9:
+    needs: [plan, c5, c6, c7, c8]
+    if: ${{ always() && needs.plan.outputs.has_work == 'true' }}
+    strategy: { fail-fast: false, max-parallel: 4, matrix: "${{ fromJson(needs.plan.outputs.m9) }}" }
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env: { ROC_YEAR: "${{ matrix.roc }}", KIND: "${{ matrix.kind }}", START_PAGE: "${{ matrix.start }}", END_PAGE: "${{ matrix.end }}", DETAIL_WORKERS: '1' }
+    steps: *steps
+  c10:
+    needs: [plan, c5, c6, c7, c8]
+    if: ${{ always() && needs.plan.outputs.has_work == 'true' }}
+    strategy: { fail-fast: false, max-parallel: 4, matrix: "${{ fromJson(needs.plan.outputs.m10) }}" }
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env: { ROC_YEAR: "${{ matrix.roc }}", KIND: "${{ matrix.kind }}", START_PAGE: "${{ matrix.start }}", END_PAGE: "${{ matrix.end }}", DETAIL_WORKERS: '1' }
+    steps: *steps
+  c11:
+    needs: [plan, c5, c6, c7, c8]
+    if: ${{ always() && needs.plan.outputs.has_work == 'true' }}
+    strategy: { fail-fast: false, max-parallel: 4, matrix: "${{ fromJson(needs.plan.outputs.m11) }}" }
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env: { ROC_YEAR: "${{ matrix.roc }}", KIND: "${{ matrix.kind }}", START_PAGE: "${{ matrix.start }}", END_PAGE: "${{ matrix.end }}", DETAIL_WORKERS: '1' }
+    steps: *steps
+  c12:
+    needs: [plan, c5, c6, c7, c8]
+    if: ${{ always() && needs.plan.outputs.has_work == 'true' }}
+    strategy: { fail-fast: false, max-parallel: 4, matrix: "${{ fromJson(needs.plan.outputs.m12) }}" }
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env: { ROC_YEAR: "${{ matrix.roc }}", KIND: "${{ matrix.kind }}", START_PAGE: "${{ matrix.start }}", END_PAGE: "${{ matrix.end }}", DETAIL_WORKERS: '1' }
+    steps: *steps
+  c13:
+    needs: [plan, c9, c10, c11, c12]
+    if: ${{ always() && needs.plan.outputs.has_work == 'true' }}
+    strategy: { fail-fast: false, max-parallel: 4, matrix: "${{ fromJson(needs.plan.outputs.m13) }}" }
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env: { ROC_YEAR: "${{ matrix.roc }}", KIND: "${{ matrix.kind }}", START_PAGE: "${{ matrix.start }}", END_PAGE: "${{ matrix.end }}", DETAIL_WORKERS: '1' }
+    steps: *steps
+  c14:
+    needs: [plan, c9, c10, c11, c12]
+    if: ${{ always() && needs.plan.outputs.has_work == 'true' }}
+    strategy: { fail-fast: false, max-parallel: 4, matrix: "${{ fromJson(needs.plan.outputs.m14) }}" }
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env: { ROC_YEAR: "${{ matrix.roc }}", KIND: "${{ matrix.kind }}", START_PAGE: "${{ matrix.start }}", END_PAGE: "${{ matrix.end }}", DETAIL_WORKERS: '1' }
+    steps: *steps
+  c15:
+    needs: [plan, c9, c10, c11, c12]
+    if: ${{ always() && needs.plan.outputs.has_work == 'true' }}
+    strategy: { fail-fast: false, max-parallel: 4, matrix: "${{ fromJson(needs.plan.outputs.m15) }}" }
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env: { ROC_YEAR: "${{ matrix.roc }}", KIND: "${{ matrix.kind }}", START_PAGE: "${{ matrix.start }}", END_PAGE: "${{ matrix.end }}", DETAIL_WORKERS: '1' }
+    steps: *steps
+  c16:
+    needs: [plan, c9, c10, c11, c12]
+    if: ${{ always() && needs.plan.outputs.has_work == 'true' }}
+    strategy: { fail-fast: false, max-parallel: 4, matrix: "${{ fromJson(needs.plan.outputs.m16) }}" }
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env: { ROC_YEAR: "${{ matrix.roc }}", KIND: "${{ matrix.kind }}", START_PAGE: "${{ matrix.start }}", END_PAGE: "${{ matrix.end }}", DETAIL_WORKERS: '1' }
+    steps: *steps
