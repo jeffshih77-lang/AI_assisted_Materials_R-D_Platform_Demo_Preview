@@ -1,0 +1,56 @@
+name: P2A boundary probe
+
+on:
+  push:
+    branches: [p2a-transport-20260912]
+    paths: [.github/workflows/p2a_boundary_probe.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Probe official CSV archive boundaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          python3 - <<'PY'
+          import urllib.request,urllib.error,hashlib,json,datetime as dt,time
+          markets={'TWSE':'sii','TPEX':'otc'}
+          months=[]
+          for y in (89,90,91):
+            for m in range(1,13): months.append((y,m))
+          months += [(114,12),(115,1),(115,7),(115,8),(115,9)]
+          def dec(b):
+            for e in ('utf-8-sig','utf-8','cp950','big5'):
+              try:return b.decode(e),e
+              except:pass
+            return b.decode('utf-8','replace'),'utf-8-replace'
+          rows=[]
+          for market,code in markets.items():
+            for y,m in months:
+              u=f'https://mopsov.twse.com.tw/nas/t21/{code}/t21sc03_{y}_{m}.csv'
+              try:
+                q=urllib.request.Request(u,headers={'User-Agent':'Mozilla/5.0','Accept':'*/*'})
+                with urllib.request.urlopen(q,timeout=45) as r: b=r.read(); st=getattr(r,'status',200)
+                t,e=dec(b); valid=st==200 and len(b)>500 and ('公司代號' in t or '公司名稱' in t) and ('營收' in t or '營業收入' in t)
+                rows.append({'market':market,'roc_year':y,'month':m,'status':st,'bytes':len(b),'sha256':hashlib.sha256(b).hexdigest() if b else None,'valid':valid,'encoding':e})
+              except Exception as x: rows.append({'market':market,'roc_year':y,'month':m,'valid':False,'error':repr(x)})
+              time.sleep(.03)
+          out={'generated_at':dt.datetime.now(dt.timezone.utc).isoformat(),'rows':rows}
+          for market in markets:
+            v=[x for x in rows if x['market']==market and x.get('valid')]
+            out[market]={'first_valid':min((x['roc_year'],x['month']) for x in v) if v else None,'last_valid':max((x['roc_year'],x['month']) for x in v) if v else None}
+          open('out/P2A_BOUNDARY_PROBE.json','w',encoding='utf-8').write(json.dumps(out,ensure_ascii=False,indent=2)+'\n')
+          print(json.dumps(out,ensure_ascii=False))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: P2A_BOUNDARY_PROBE
+          path: out/
+          if-no-files-found: error
+          retention-days: 7
