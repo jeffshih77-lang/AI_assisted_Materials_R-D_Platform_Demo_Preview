@@ -1,0 +1,132 @@
+name: P4-A V5 optimized exact repair workers12
+on:
+  push:
+    paths:
+      - '.github/workflows/p4a_v5_optimized_exact_repair_w12.yml'
+  workflow_dispatch:
+permissions:
+  actions: read
+  contents: read
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      ma: ${{ steps.plan.outputs.ma }}
+      mb: ${{ steps.plan.outputs.mb }}
+      page_count: ${{ steps.plan.outputs.page_count }}
+      item_count: ${{ steps.plan.outputs.item_count }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      PREDECESSOR_RUN: '34684185077'
+    steps:
+      - id: plan
+        run: |
+          set -euo pipefail
+          gh api "repos/$REPO/actions/runs/$PREDECESSOR_RUN/artifacts?per_page=100" --paginate --slurp > predecessor.json
+          python - <<'PY'
+          import json,re,os
+          ranges=[
+            (96,'O',50,99),(98,'L',200,246),(98,'O',0,126),(99,'L',0,270),(99,'O',0,142),
+            (100,'L',0,301),(100,'O',0,152),(101,'L',0,274),(101,'O',0,144),
+            (102,'L',0,293),(102,'O',0,159),(103,'L',0,295),(103,'O',0,163),
+            (105,'L',0,304),(105,'O',0,177),(106,'L',0,313),(106,'O',0,174),
+            (107,'L',0,327),(107,'O',0,184),(108,'L',0,336),(108,'O',0,190),
+            (109,'L',0,357),(109,'O',0,219),(110,'L',0,409),(110,'O',0,248),
+            (111,'L',0,380),(112,'L',0,371),(112,'O',0,235),(113,'L',0,424),
+            (114,'L',0,458),(114,'O',0,286),(115,'L',16,370),(115,'O',0,232)
+          ]
+          required={(y,k,p) for y,k,s,e in ranges for p in range(s,e+1)}
+          assert len(required)==8425
+          objs=json.load(open('predecessor.json')); arts=[]
+          for o in objs: arts += o.get('artifacts',[])
+          rx=re.compile(r'^p4a-v5gap-ROC(\d+)-([LO])-P(\d+)-(\d+)$')
+          done=set()
+          for a in arts:
+            if a.get('expired'): continue
+            m=rx.match(a.get('name',''))
+            if not m: continue
+            y,k,s,e=int(m.group(1)),m.group(2),int(m.group(3)),int(m.group(4))
+            done.update((y,k,p) for p in range(s,e+1))
+          if not done <= required: raise SystemExit(f'predecessor artifact outside V5 scope: {sorted(done-required)[:10]}')
+          assert len(done)==20, f'expected 20 successful predecessor pages, got {len(done)}'
+          remain=required-done
+          assert len(remain)==8405
+          # Convert remaining pages to contiguous <=20-page chunks in year/market/page order.
+          items=[]
+          for y in range(81,116):
+            for k in ('L','O'):
+              ps=sorted(p for yy,kk,p in remain if yy==y and kk==k)
+              i=0
+              while i<len(ps):
+                s=ps[i]; e=s; i+=1
+                while i<len(ps) and ps[i]==e+1 and e-s+1<20:
+                  e=ps[i]; i+=1
+                items.append({'roc':y,'kind':k,'start':s,'end':e})
+          assert sum(x['end']-x['start']+1 for x in items)==8405
+          A=items[::2]; B=items[1::2]
+          assert len(A)<=256 and len(B)<=256
+          print('authoritative audit Drive 1xxO1eRiGAW9V1iE_nZdvT48LLEUDg7Gj')
+          print('predecessor done pages',len(done),'remaining',len(remain),'items',len(items),'groups',len(A),len(B))
+          with open(os.environ['GITHUB_OUTPUT'],'a') as f:
+            f.write('ma='+json.dumps({'include':A},separators=(',',':'))+'\n')
+            f.write('mb='+json.dumps({'include':B},separators=(',',':'))+'\n')
+            f.write('page_count=8405\nitem_count='+str(len(items))+'\n')
+          PY
+
+  captureA:
+    needs: plan
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix: ${{ fromJson(needs.plan.outputs.ma) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      ROC_YEAR: ${{ matrix.roc }}
+      KIND: ${{ matrix.kind }}
+      START_PAGE: ${{ matrix.start }}
+      END_PAGE: ${{ matrix.end }}
+      DETAIL_WORKERS: '12'
+    steps: &capture_steps
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - name: Capture exact remaining V5 pages
+        run: |
+          cp p4a_runner/p4a_material_info_page_chunk_v4.py /tmp/p4a_collector.py
+          sed -i 's/def get(url, retries=3):/def get(url, retries=20):/' /tmp/p4a_collector.py
+          python /tmp/p4a_collector.py
+      - name: Package immutable RAW
+        run: |
+          python - <<'PY'
+          import pathlib,zipfile
+          roots=[p for p in pathlib.Path('out_p4a_chunk').iterdir() if p.is_dir()]
+          assert len(roots)==1, roots
+          root=roots[0]; out=pathlib.Path(root.name+'.zip')
+          with zipfile.ZipFile(out,'w',zipfile.ZIP_DEFLATED) as z:
+            for p in sorted(root.rglob('*')):
+              if p.is_file(): z.write(p,p.relative_to(root.parent))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: p4a-v5opt-ROC${{ matrix.roc }}-${{ matrix.kind }}-P${{ matrix.start }}-${{ matrix.end }}
+          path: P4A-MATERIAL-ROC${{ matrix.roc }}-${{ matrix.kind }}-P*.zip
+          if-no-files-found: error
+          retention-days: 2
+
+  captureB:
+    needs: plan
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix: ${{ fromJson(needs.plan.outputs.mb) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      ROC_YEAR: ${{ matrix.roc }}
+      KIND: ${{ matrix.kind }}
+      START_PAGE: ${{ matrix.start }}
+      END_PAGE: ${{ matrix.end }}
+      DETAIL_WORKERS: '12'
+    steps: *capture_steps
