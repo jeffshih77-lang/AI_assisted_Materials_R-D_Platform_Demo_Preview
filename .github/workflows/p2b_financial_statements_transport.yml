@@ -1,0 +1,237 @@
+name: P2B formal MOPS financial statements transport
+
+on:
+  push:
+    branches:
+      - p2b-financial-transport-20260912
+    paths:
+      - .github/workflows/p2b_financial_statements_transport.yml
+
+permissions:
+  contents: read
+
+jobs:
+  capture:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Capture P2-B formal financial statement RAW
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import datetime as dt, hashlib, json, pathlib, re, time, urllib.parse, urllib.request, urllib.error, zipfile
+
+          OUT=pathlib.Path('out'); RAW=OUT/'raw'; META=OUT/'metadata'; CTRL=OUT/'control'
+          for p in (RAW,META,CTRL): p.mkdir(parents=True, exist_ok=True)
+
+          BASE='https://mops.twse.com.tw/mops/web/{endpoint}'
+          MARKETS={'TWSE':'sii','TPEX':'otc'}
+          REPORTS={
+            'PL': {'endpoint':'ajax_t163sb04','markers':['公司代號','基本每股盈餘']},
+            'BS': {'endpoint':'ajax_t163sb05','markers':['公司代號','資產']},
+            'CF': {'endpoint':'ajax_t163sb20','markers':['公司代號','現金流量']},
+            'OPR': {'endpoint':'ajax_t163sb06','markers':['公司代號','營業利益率']},
+          }
+          START=(102,1); END=(115,2)
+          UA='Mozilla/5.0 (compatible; P2BFinancialStatementsRawCollector/1.0)'
+
+          def sha(b): return hashlib.sha256(b).hexdigest()
+          def quarters(a,b):
+            y,q=a
+            while (y,q)<=b:
+              yield y,q
+              q += 1
+              if q==5: y += 1; q=1
+          def decode(b):
+            for enc in ('utf-8-sig','utf-8','cp950','big5'):
+              try: return b.decode(enc), enc
+              except UnicodeDecodeError: pass
+            return b.decode('utf-8','replace'), 'utf-8-replace'
+          def fetch(report, market, roc, q, tries=4):
+            spec=REPORTS[report]
+            url=BASE.format(endpoint=spec['endpoint'])
+            form={
+              'encodeURIComponent':'1','step':'1','firstin':'1','off':'1','isQuery':'Y',
+              'TYPEK':MARKETS[market], 'year':str(roc), 'season':f'{q:02d}'
+            }
+            body=urllib.parse.urlencode(form).encode('ascii')
+            last=None
+            for i in range(tries):
+              at=dt.datetime.now(dt.timezone.utc).isoformat().replace('+00:00','Z')
+              try:
+                req=urllib.request.Request(url,data=body,method='POST',headers={
+                  'User-Agent':UA,
+                  'Accept':'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                  'Content-Type':'application/x-www-form-urlencoded',
+                  'Referer':'https://mops.twse.com.tw/mops/web/index',
+                })
+                with urllib.request.urlopen(req,timeout=90) as r:
+                  rb=r.read()
+                  return {'ok':True,'status':getattr(r,'status',200),'body':rb,'headers':dict(r.headers.items()),'final_url':r.geturl(),'retrieved_at':at,'request_url':url,'form':form}
+              except urllib.error.HTTPError as e:
+                rb=e.read() if hasattr(e,'read') else b''
+                headers=dict(e.headers.items()) if e.headers else {}
+                if e.code in (404,410):
+                  return {'ok':True,'status':e.code,'body':rb,'headers':headers,'final_url':url,'retrieved_at':at,'request_url':url,'form':form}
+                last=f'HTTPError {e.code}'
+              except Exception as e:
+                last=repr(e)
+              if i<tries-1: time.sleep(min(8,2**i))
+            return {'ok':False,'status':None,'body':b'','headers':{},'final_url':url,'retrieved_at':at,'request_url':url,'form':form,'error':last}
+
+          def classify(report, r):
+            if not r['ok']:
+              return False,None,None,'TRANSPORT_ERROR'
+            text,enc=decode(r['body']); low=text.lower()
+            stripped=re.sub(r'\s+','',text)
+            nodata=any(x in stripped for x in ['查無資料','無符合條件之資料','沒有資料','無資料'])
+            blocked=any(x in low for x in ['captcha','access denied','forbidden']) or ('驗證碼' in text)
+            spec=REPORTS[report]
+            marker_hit=all(m in text for m in spec['markers'])
+            if report=='CF': marker_hit=('公司代號' in text) and any(m in text for m in ['現金流量','營業活動之淨現金流','營業活動之現金流量'])
+            if report=='OPR': marker_hit=('公司代號' in text) and any(m in text for m in ['營業利益率','毛利率','稅後純益率'])
+            valid=(r['status']==200 and len(r['body'])>1000 and marker_hit and not nodata and not blocked)
+            if valid: return True,enc,'MOPS_IFRS_AGGREGATE_HTML','DATA'
+            if blocked: kind='BLOCKED_TEMPLATE'
+            elif nodata: kind='NO_DATA'
+            elif r['status'] in (404,410): kind='NO_DATA_HTTP'
+            elif r['status']==200: kind='INVALID_OR_TEMPLATE'
+            else: kind='HTTP_ERROR'
+            return False,enc,'UNCLASSIFIED',kind
+
+          # Qualification samples: IFRS boundary, middle, recent, latest complete, next quarter no-data.
+          samples=[(101,4),(102,1),(108,4),(114,4),(115,2),(115,3)]
+          qualification=[]; repeatability=[]
+          for market in MARKETS:
+            for report in REPORTS:
+              for roc,q in samples:
+                r=fetch(report,market,roc,q)
+                valid,enc,schema,kind=classify(report,r)
+                qualification.append({
+                  'market':market,'report':report,'roc_year':roc,'quarter':q,'request_url':r['request_url'],
+                  'request_form':r['form'],'transport_ok':r['ok'],'http_status':r['status'],'bytes':len(r['body']),
+                  'sha256':sha(r['body']) if r['body'] else None,'valid':valid,'schema_family':schema,
+                  'encoding':enc,'classification':kind,'retrieved_at':r['retrieved_at'],'error':r.get('error')
+                })
+                time.sleep(.08)
+              a=fetch(report,market,115,2); time.sleep(.35); b=fetch(report,market,115,2)
+              repeatability.append({
+                'market':market,'report':report,'first_status':a['status'],'second_status':b['status'],
+                'first_sha256':sha(a['body']) if a['body'] else None,'second_sha256':sha(b['body']) if b['body'] else None,
+                'identical':bool(a['body']) and a['body']==b['body']
+              })
+
+          # Freeze only if IFRS start and latest complete pass for every market/report and repeatability is exact.
+          for market in MARKETS:
+            for report in REPORTS:
+              for key in ((102,1),(115,2)):
+                qx=[x for x in qualification if x['market']==market and x['report']==report and (x['roc_year'],x['quarter'])==key][0]
+                if not qx['valid']:
+                  raise SystemExit('QUALIFICATION_FAIL '+json.dumps(qx,ensure_ascii=False))
+              rp=[x for x in repeatability if x['market']==market and x['report']==report][0]
+              if not rp['identical']:
+                raise SystemExit('REPEATABILITY_FAIL '+json.dumps(rp,ensure_ascii=False))
+
+          captures=[]; anomalies=[]; ledger=[]
+          for market in MARKETS:
+            for roc,q in quarters(START,END):
+              members=[]; wu_ok=True
+              for report in REPORTS:
+                r=fetch(report,market,roc,q)
+                valid,enc,schema,kind=classify(report,r)
+                base={
+                  'market':market,'report':report,'roc_year':roc,'quarter':q,'request_url':r['request_url'],
+                  'request_form':r['form'],'http_status':r['status'],'bytes':len(r['body']),
+                  'sha256':sha(r['body']) if r['body'] else None,'retrieved_at':r['retrieved_at'],
+                  'schema_family':schema,'encoding':enc,'classification':kind
+                }
+                if not valid:
+                  anomalies.append(base); wu_ok=False; continue
+                rd=RAW/market/f'{roc:03d}Q{q}'; md=META/market/f'{roc:03d}Q{q}'
+                rd.mkdir(parents=True,exist_ok=True); md.mkdir(parents=True,exist_ok=True)
+                rp=rd/f'{report}.response.bin'; mp=md/f'{report}.capture.json'
+                rp.write_bytes(r['body'])
+                meta={
+                  'schema':'p2b_exact_http_capture_v1','dataset':'FINANCIAL_STATEMENTS_EPS',
+                  'work_unit_id':f'P2B-{market}-{roc:03d}Q{q}','market':market,'roc_year':roc,'quarter':q,
+                  'report':report,'source_family':'MOPS_IFRS_FINANCIAL_AGGREGATES','schema_family':schema,
+                  'method':'POST','request_url':r['request_url'],'request_form':r['form'],'final_url':r['final_url'],
+                  'retrieved_at':r['retrieved_at'],'published_at':'unknown','available_at':'unknown',
+                  'restatement_semantics':'current aggregate snapshot at retrieval; historical filing/revision timestamp not represented by this endpoint',
+                  'http_status':r['status'],'response_headers':r['headers'],'payload_bytes':len(r['body']),
+                  'payload_sha256':sha(r['body']),'encoding_detected':enc,'raw_semantics':'exact HTTP response body bytes',
+                  'classification':'FORMAL_RAW_CANDIDATE_PENDING_DRIVE_READBACK'
+                }
+                mp.write_text(json.dumps(meta,ensure_ascii=False,indent=2,sort_keys=True)+'\n',encoding='utf-8')
+                members.append({'report':report,'payload_bytes':len(r['body']),'payload_sha256':sha(r['body']),'raw_path':str(rp.relative_to(OUT)),'metadata_path':str(mp.relative_to(OUT))})
+                captures.append(base | {'raw_path':str(rp.relative_to(OUT)),'metadata_path':str(mp.relative_to(OUT))})
+                time.sleep(.08)
+              ledger.append({
+                'work_unit_id':f'P2B-{market}-{roc:03d}Q{q}','market':market,'roc_year':roc,'quarter':q,
+                'status':'RAW_CAPTURED_PENDING_CLOUD_VERIFY' if wu_ok and len(members)==len(REPORTS) else 'INCOMPLETE_ANOMALY',
+                'members':members
+              })
+
+          incomplete=[x for x in ledger if x['status']!='RAW_CAPTURED_PENDING_CLOUD_VERIFY']
+          if incomplete:
+            raise SystemExit('COVERAGE_GAP '+json.dumps(incomplete[:10],ensure_ascii=False))
+
+          q101={}
+          for market in MARKETS:
+            q101[market]={}
+            for report in REPORTS:
+              x=[z for z in qualification if z['market']==market and z['report']==report and z['roc_year']==101 and z['quarter']==4][0]
+              q101[market][report]={'valid':x['valid'],'classification':x['classification'],'bytes':x['bytes'],'sha256':x['sha256']}
+
+          contract={
+            'schema':'p2b_source_contract_v1','version':'P2-B-SOURCE-CONTRACT-v1','dataset':'FINANCIAL_STATEMENTS_EPS','status':'FROZEN',
+            'source_family':'MOPS_IFRS_FINANCIAL_AGGREGATES','official_host':'mops.twse.com.tw','method':'POST',
+            'reports':REPORTS,'market_mapping':MARKETS,'work_unit':'market x quarter/reporting-period','formal_coverage':{'start':'ROC102-Q1','end':'ROC115-Q2'},
+            'historical_source_boundary':'IFRS aggregate regime begins ROC102-Q1 for this frozen contract; ROC101-Q4 is qualification-only boundary evidence and is not merged into v1',
+            'restatement_boundary':'endpoint returns current aggregate historical snapshot; filing-version history and original publication timestamps are not represented; published_at/available_at remain unknown in RAW metadata',
+            'raw_preservation':'exact HTTP response body bytes + exact POST form + response metadata','encoding':'detected per payload; RAW never transcoded',
+            'validation':'HTTP 200 + nontrivial body + report-specific semantic markers; no-data/templates classified, never promoted',
+            'latest_complete_period_qualified':'ROC115-Q2 / 2026Q2','immutable_raw':True
+          }
+          qdoc={'schema':'p2b_source_qualification_v1','status':'PASS','samples':qualification,'repeatability':repeatability,'ifrs_boundary_probe_roc101q4':q101,'contract_version':'P2-B-SOURCE-CONTRACT-v1'}
+          coverage={
+            'TWSE':{'first':'ROC102-Q1','last':'ROC115-Q2','work_units':sum(1 for x in ledger if x['market']=='TWSE'),'internal_gaps':0},
+            'TPEX':{'first':'ROC102-Q1','last':'ROC115-Q2','work_units':sum(1 for x in ledger if x['market']=='TPEX'),'internal_gaps':0},
+            'latest_complete_gregorian':'2026Q2','source_boundaries':['PRE_IFRS_ROC101Q4_AND_EARLIER_NOT_IN_V1','POINT_IN_TIME_FILING_VERSION_HISTORY_NOT_EXPOSED_BY_AGGREGATE_ENDPOINT']
+          }
+          manifest={
+            'schema':'p2b_manifest_v1','dataset':'FINANCIAL_STATEMENTS_EPS','claimant_id':'P2-B-CHAT-20260912-1732',
+            'source_contract_version':'P2-B-SOURCE-CONTRACT-v1','generated_at':dt.datetime.now(dt.timezone.utc).isoformat().replace('+00:00','Z'),
+            'coverage':coverage,'work_units':len(ledger),'raw_payload_files':len(captures),'payload_bytes':sum(x['bytes'] for x in captures),
+            'members':ledger,'formal_state':'HISTORICAL_BASE_CAPTURED_WITH_SOURCE_BOUNDARY_PENDING_CLOUD_VERIFY'
+          }
+          controls={
+            'P2B_SOURCE_CONTRACT.json':contract,
+            'P2B_SOURCE_QUALIFICATION.json':qdoc,
+            'P2B_WORK_UNIT_LEDGER.json':{'schema':'p2b_work_unit_ledger_v1','work_units':ledger},
+            'P2B_COVERAGE.json':{'schema':'p2b_coverage_v1','coverage':coverage,'status':'HISTORICAL_BASE_CAPTURED_WITH_SOURCE_BOUNDARY_PENDING_CLOUD_VERIFY'},
+            'P2B_ANOMALY_LEDGER.json':{'schema':'p2b_anomaly_ledger_v1','qualification_boundary_events':[x for x in qualification if x['roc_year'] in (101,115) and x['quarter'] in (3,4)],'capture_anomalies':anomalies,'unclassified_true_gaps':[]},
+            'P2B_MANIFEST.json':manifest
+          }
+          for name,obj in controls.items():
+            (CTRL/name).write_text(json.dumps(obj,ensure_ascii=False,indent=2,sort_keys=True)+'\n',encoding='utf-8')
+
+          package=OUT/'P2B_FINANCIAL_STATEMENTS_EPS_FORMAL_RAW_20260912.zip'
+          files=sorted(p for root in (RAW,META,CTRL) for p in root.rglob('*') if p.is_file())
+          with zipfile.ZipFile(package,'w',compression=zipfile.ZIP_DEFLATED,compresslevel=9) as z:
+            for p in files: z.write(p,p.relative_to(OUT).as_posix())
+          psha=sha(package.read_bytes())
+          info={'schema':'p2b_package_info_v1','file_name':package.name,'bytes':package.stat().st_size,'sha256':psha,'member_count':len(files),'raw_payload_files':len(captures),'work_units':len(ledger),'formal_status':'PENDING_DRIVE_UPLOAD_AND_READBACK'}
+          (OUT/'P2B_PACKAGE_INFO.json').write_text(json.dumps(info,ensure_ascii=False,indent=2,sort_keys=True)+'\n',encoding='utf-8')
+          (OUT/'SHA256SUMS.txt').write_text(f'{psha}  {package.name}\n',encoding='utf-8')
+          print(json.dumps({'qualification':'PASS','coverage':coverage,'work_units':len(ledger),'raw_payload_files':len(captures),'payload_bytes':manifest['payload_bytes'],'package_sha256':psha},ensure_ascii=False))
+          PY
+
+      - name: Upload P2-B formal RAW artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: P2B_FINANCIAL_STATEMENTS_EPS_FORMAL_RAW_20260912
+          path: out/
+          if-no-files-found: error
+          retention-days: 7
