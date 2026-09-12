@@ -1,7 +1,7 @@
 name: P4-A V5 post harvest 20260912
 on:
   workflow_run:
-    workflows: ["P4-A exact missing V5 20260912"]
+    workflows: ["P4-A exact missing V5 20260912", "P4-A exact missing V5 accelerated 20260912"]
     types: [completed]
 permissions:
   actions: read
@@ -27,7 +27,7 @@ jobs:
           objs=json.load(open('pages.json'))
           arts=[]
           for o in objs: arts.extend(o.get('artifacts',[]))
-          pat=re.compile(r'^p4a-v5-gap-ROC(\d+)-([LO])-P(\d+)-(\d+)$')
+          pat=re.compile(r'^p4a-v5a?-gap-ROC(\d+)-([LO])-P(\d+)-(\d+)$')
           rows=[]; pages=0
           for a in arts:
             m=pat.match(a.get('name',''))
@@ -36,8 +36,6 @@ jobs:
             rows.append({'id':int(a['id']),'size':int(a['size_in_bytes']),'roc':y,'kind':k,'start':s,'end':e})
             pages += e-s+1
           rows.sort(key=lambda x:(x['roc'],x['kind'],x['start'],x['end'],x['id']))
-          # Conservative batching by GitHub artifact archive size. Inner payload is already ZIP,
-          # so archive size is a close upper-bound proxy. Keep well below Drive's 100 MiB transfer ceiling.
           limit=55_000_000; batches=[]; cur=[]; sz=0
           for r in rows:
             if cur and sz+r['size']>limit:
@@ -88,7 +86,7 @@ jobs:
           python - <<'PY'
           import os,json,re,zipfile,io,hashlib,pathlib
           inc=pathlib.Path('incoming'); stage=pathlib.Path('stage')
-          pat=re.compile(r'^p4a-v5-gap-ROC(\d+)-([LO])-P(\d+)-(\d+)$')
+          pat=re.compile(r'^p4a-v5a?-gap-ROC(\d+)-([LO])-P(\d+)-(\d+)$')
           ids=[int(x) for x in os.environ['IDS_CSV'].split(',') if x]; index=[]
           for aid in ids:
             meta=json.load(open(inc/f'{aid}.meta.json')); outer=(inc/f'{aid}.outer.zip').read_bytes()
