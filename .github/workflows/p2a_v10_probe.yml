@@ -1,0 +1,41 @@
+name: P2A pre-ROC99 V10 monthly revenue probe
+on:
+  push:
+    branches: [p2a-transport-20260912]
+    paths: [.github/workflows/p2a_v10_probe.yml]
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          python3 - <<'PY'
+          import urllib.request,urllib.error,hashlib,json,time
+          rows=[]
+          for market,code in {'TWSE':'sii','TPEX':'otc'}.items():
+            for y,m in [(90,1),(90,5),(90,6),(90,7),(91,8),(98,12),(99,1)]:
+              u=f'https://mopsov.twse.com.tw/nas/t21/{code}/t21sc03_{y}_{m}.html'
+              try:
+                req=urllib.request.Request(u,headers={'User-Agent':'Mozilla/5.0','Referer':'https://mopsov.twse.com.tw/','Accept':'text/html,*/*'})
+                with urllib.request.urlopen(req,timeout=45) as r:b=r.read();st=getattr(r,'status',200)
+                text=None;enc=None
+                for e in ('big5','cp950','utf-8-sig','utf-8'):
+                  try:text=b.decode(e);enc=e;break
+                  except:pass
+                valid=st==200 and len(b)>1024 and text is not None and '營業收入統計表' in text and ('公司代號' in text or '公司名稱' in text)
+                rows.append({'market':market,'roc_year':y,'month':m,'url':u,'status':st,'bytes':len(b),'sha256':hashlib.sha256(b).hexdigest(),'encoding':enc,'valid':valid,'head':(text or '')[:140].replace('\n',' ')})
+              except Exception as e: rows.append({'market':market,'roc_year':y,'month':m,'url':u,'valid':False,'error':repr(e)})
+              time.sleep(.05)
+          open('out/P2A_V10_PROBE.json','w',encoding='utf-8').write(json.dumps({'rows':rows},ensure_ascii=False,indent=2)+'\n')
+          print(json.dumps(rows,ensure_ascii=False))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: P2A_V10_PROBE
+          path: out/
+          retention-days: 7
