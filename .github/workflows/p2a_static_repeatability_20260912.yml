@@ -1,0 +1,82 @@
+name: P2A static legacy repeatability 20260912
+on:
+  push:
+    branches: [p2a-repeatability-20260912]
+    paths: [.github/workflows/p2a_static_repeatability_20260912.yml]
+permissions:
+  contents: write
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: p2a-repeatability-20260912
+      - name: Repeatability and boundary probe
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out p2a-results
+          python3 - <<'PY'
+          import urllib.request, urllib.error, hashlib, json, re, html, time, pathlib, datetime as dt
+          UA='Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120 Safari/537.36'
+          pats={'TWSE':'sii','TPEX':'otc'}
+          samples=[(90,5),(90,6),(101,12),(102,1)]
+          def sha(b): return hashlib.sha256(b).hexdigest()
+          def fetch(url):
+            at=dt.datetime.now(dt.timezone.utc).isoformat().replace('+00:00','Z')
+            req=urllib.request.Request(url,headers={'User-Agent':UA,'Referer':'https://mopsov.twse.com.tw/','Accept':'text/html,*/*','Connection':'close'})
+            try:
+              with urllib.request.urlopen(req,timeout=45) as r:
+                return {'status':getattr(r,'status',200),'body':r.read(),'headers':dict(r.headers.items()),'retrieved_at':at}
+            except urllib.error.HTTPError as e:
+              return {'status':e.code,'body':e.read() if hasattr(e,'read') else b'','headers':dict(e.headers.items()) if e.headers else {},'retrieved_at':at}
+          def decode(b):
+            for enc in ('cp950','big5','utf-8-sig','utf-8'):
+              try:return b.decode(enc),enc
+              except:pass
+            return b.decode('cp950','replace'),'cp950-replace'
+          def validate(b):
+            if not b:return {'valid':False,'rows':0,'codes':0,'encoding':None,'widths':{}}
+            t,e=decode(b); rows=[]
+            for tr in re.findall(r'<tr\b[^>]*>([\s\S]*?)</tr>',t,re.I):
+              cs=[html.unescape(re.sub(r'<[^>]*>','',x)).replace('\xa0',' ').strip() for x in re.findall(r'<t[dh]\b[^>]*>([\s\S]*?)</t[dh]>',tr,re.I)]
+              if cs and re.fullmatch(r'\d{4,6}',cs[0]) and 8 <= len(cs) <= 13: rows.append((cs[0],len(cs)))
+            from collections import Counter
+            widths=Counter(w for _,w in rows)
+            codes=set(c for c,_ in rows)
+            return {'valid':('營業收入' in t and len(codes)>=5),'rows':len(rows),'codes':len(codes),'encoding':e,'widths':dict(widths)}
+          obs=[]
+          for market,code in pats.items():
+            for y,m in samples:
+              url=f'https://mopsov.twse.com.tw/nas/t21/{code}/t21sc03_{y}_{m}.html'
+              a=fetch(url); time.sleep(.25); b=fetch(url)
+              va=validate(a['body']); vb=validate(b['body'])
+              rec={'market':market,'roc_year':y,'month':m,'url':url,'first_status':a['status'],'second_status':b['status'],'first_bytes':len(a['body']),'second_bytes':len(b['body']),'first_sha256':sha(a['body']) if a['body'] else None,'second_sha256':sha(b['body']) if b['body'] else None,'identical':a['body']==b['body'] and bool(a['body']),'first_validation':va,'second_validation':vb,'retrieved_at_first':a['retrieved_at'],'retrieved_at_second':b['retrieved_at']}
+              obs.append(rec)
+              if a['body']: pathlib.Path(f'out/{market}_{y:03d}_{m:02d}_first.response.bin').write_bytes(a['body'])
+              if b['body']: pathlib.Path(f'out/{market}_{y:03d}_{m:02d}_second.response.bin').write_bytes(b['body'])
+          summary={'schema':'p2a_static_repeatability_boundary_probe_v1','observations':obs,'required':{'pre_boundary_090_05_no_valid_data':all(not x['first_validation']['valid'] for x in obs if x['roc_year']==90 and x['month']==5),'boundary_090_06_valid_both_markets':all(x['first_validation']['valid'] for x in obs if x['roc_year']==90 and x['month']==6),'repeatability_090_06_identical':all(x['identical'] for x in obs if x['roc_year']==90 and x['month']==6),'transition_101_12_102_01_valid':all(x['first_validation']['valid'] for x in obs if (x['roc_year'],x['month']) in [(101,12),(102,1)])}}
+          pathlib.Path('out/P2A_STATIC_REPEATABILITY_BOUNDARY_PROBE.json').write_text(json.dumps(summary,ensure_ascii=False,indent=2,sort_keys=True)+'\n',encoding='utf-8')
+          pathlib.Path('p2a-results/p2a_static_repeatability_latest.json').write_text(json.dumps(summary,ensure_ascii=False,indent=2,sort_keys=True)+'\n',encoding='utf-8')
+          print(json.dumps(summary,ensure_ascii=False))
+          if not all(summary['required'].values()): raise SystemExit('REPEATABILITY_OR_BOUNDARY_PROBE_FAIL')
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: P2A_STATIC_REPEATABILITY_BOUNDARY_PROBE_20260912
+          path: out/
+          retention-days: 7
+      - name: Publish pointer
+        if: always()
+        shell: bash
+        run: |
+          if [ -f p2a-results/p2a_static_repeatability_latest.json ]; then
+            git config user.name 'p2a-automation'
+            git config user.email 'actions@users.noreply.github.com'
+            git add p2a-results/p2a_static_repeatability_latest.json
+            git commit -m "P2-A static repeatability result ${GITHUB_RUN_ID}" || true
+            git push origin HEAD:p2a-repeatability-20260912 || true
+          fi
