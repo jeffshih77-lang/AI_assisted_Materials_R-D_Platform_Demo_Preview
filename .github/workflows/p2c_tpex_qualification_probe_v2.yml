@@ -1,0 +1,88 @@
+name: P2-C TPEx qualification probe v2
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/p2c_tpex_qualification_probe_v2.yml
+
+permissions:
+  contents: read
+
+jobs:
+  qualify-tpex:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Capture TPEx with strict TLS then recorded insecure fallback
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import pathlib, subprocess, hashlib, json, datetime, tempfile
+          OUT=pathlib.Path('out_p2c_tpex_q2'); OUT.mkdir(exist_ok=True)
+          probes=[
+            ('tpex_pe_0920731','https://www.tpex.org.tw/web/stock/aftertrading/peratio_analysis/pera_result.php?l=zh-tw&o=json&d=092/07/31&c='),
+            ('tpex_pe_0920801','https://www.tpex.org.tw/web/stock/aftertrading/peratio_analysis/pera_result.php?l=zh-tw&o=json&d=092/08/01&c='),
+            ('tpex_pe_0920804','https://www.tpex.org.tw/web/stock/aftertrading/peratio_analysis/pera_result.php?l=zh-tw&o=json&d=092/08/04&c='),
+            ('tpex_pe_0951229','https://www.tpex.org.tw/web/stock/aftertrading/peratio_analysis/pera_result.php?l=zh-tw&o=json&d=095/12/29&c='),
+            ('tpex_pe_0960102','https://www.tpex.org.tw/web/stock/aftertrading/peratio_analysis/pera_result.php?l=zh-tw&o=json&d=096/01/02&c='),
+            ('tpex_pe_1060412','https://www.tpex.org.tw/web/stock/aftertrading/peratio_analysis/pera_result.php?l=zh-tw&o=json&d=106/04/12&c='),
+            ('tpex_pe_1150911_a','https://www.tpex.org.tw/web/stock/aftertrading/peratio_analysis/pera_result.php?l=zh-tw&o=json&d=115/09/11&c='),
+            ('tpex_pe_1150911_b','https://www.tpex.org.tw/web/stock/aftertrading/peratio_analysis/pera_result.php?l=zh-tw&o=json&d=115/09/11&c='),
+            ('tpex_openapi_peratio','https://www.tpex.org.tw/openapi/v1/tpex_mainboard_peratio_analysis'),
+          ]
+          def classify(body):
+            txt=body[:50000].decode('utf-8',errors='replace')
+            out={'looks_json':False,'json_top':None,'json_status':None,'json_rows_hint':None,'looks_html':'<html' in txt[:1000].lower() or '<table' in txt.lower(),'no_data':False}
+            out['no_data']=any(x in txt for x in ['查無資料','無符合條件資料','沒有符合條件的資料','No data','no data'])
+            try:
+              j=json.loads(body.decode('utf-8-sig'))
+              out['looks_json']=True; out['json_top']=type(j).__name__
+              if isinstance(j,list): out['json_rows_hint']=len(j)
+              elif isinstance(j,dict):
+                for k in ['stat','status','message','msg']:
+                  if k in j: out['json_status']=j[k]
+                for k in ['aaData','data','tables']:
+                  if isinstance(j.get(k),list): out['json_rows_hint']=len(j[k]); break
+            except Exception: pass
+            return out
+          manifest=[]
+          for i,(name,url) in enumerate(probes):
+            body=OUT/f'{i:02d}_{name}.body.bin'; hdr=OUT/f'{i:02d}_{name}.headers.txt'; err=OUT/f'{i:02d}_{name}.curl.stderr.txt'
+            base=['curl','-sS','-L','--connect-timeout','20','--max-time','60','-H','Accept: */*','-H','Accept-Encoding: identity','-A','Mozilla/5.0 P2-C-SourceQualification/2.0','-D',str(hdr),'-o',str(body),'-w','%{http_code} %{url_effective}',url]
+            strict=subprocess.run(base,capture_output=True,text=True)
+            tls_verified=(strict.returncode==0)
+            fallback_used=False
+            stderr=strict.stderr
+            output=strict.stdout.strip()
+            if strict.returncode!=0:
+              fallback_used=True
+              insecure=base.copy(); insecure.insert(1,'-k')
+              second=subprocess.run(insecure,capture_output=True,text=True)
+              stderr += '\n--- FALLBACK -k ---\n'+second.stderr
+              output=second.stdout.strip(); rc=second.returncode
+            else: rc=strict.returncode
+            err.write_text(stderr)
+            b=body.read_bytes() if body.exists() else b''
+            sha=hashlib.sha256(b).hexdigest()
+            parts=output.split(' ',1); status=int(parts[0]) if parts and parts[0].isdigit() else None; final_url=parts[1] if len(parts)>1 else url
+            meta={'probe':name,'request_url':url,'final_url':final_url,'status':status,'curl_rc':rc,'strict_tls_rc':strict.returncode,'tls_verified':tls_verified,'insecure_fallback_used':fallback_used,'bytes':len(b),'sha256':sha,'fetched_at_utc':datetime.datetime.now(datetime.timezone.utc).isoformat(),'classification':classify(b)}
+            (OUT/f'{i:02d}_{name}.meta.json').write_text(json.dumps(meta,ensure_ascii=False,sort_keys=True,indent=2)+'\n')
+            manifest.append(meta); print(meta)
+          by={m['probe']:m for m in manifest}
+          repeat={'a':'tpex_pe_1150911_a','b':'tpex_pe_1150911_b','same_status':by['tpex_pe_1150911_a']['status']==by['tpex_pe_1150911_b']['status'],'same_bytes':by['tpex_pe_1150911_a']['bytes']==by['tpex_pe_1150911_b']['bytes'],'same_sha256':by['tpex_pe_1150911_a']['sha256']==by['tpex_pe_1150911_b']['sha256'],'sha256_a':by['tpex_pe_1150911_a']['sha256'],'sha256_b':by['tpex_pe_1150911_b']['sha256']}
+          (OUT/'REPEAT_FETCH_CHECK.json').write_text(json.dumps(repeat,ensure_ascii=False,sort_keys=True,indent=2)+'\n')
+          (OUT/'QUALIFICATION_MANIFEST.json').write_text(json.dumps(manifest,ensure_ascii=False,sort_keys=True,indent=2)+'\n')
+          (OUT/'SHA256SUMS.txt').write_text(''.join(f"{m['sha256']}  {i:02d}_{m['probe']}.body.bin\n" for i,m in enumerate(manifest)))
+          print('REPEAT',repeat)
+          PY
+      - name: Upload TPEx qualification evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: p2c-tpex-qualification-v2
+          path: out_p2c_tpex_q2/
+          if-no-files-found: error
+          retention-days: 7
