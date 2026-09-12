@@ -1,0 +1,169 @@
+name: P2-C source qualification probe v1
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/p2c_source_qualification_probe_v1.yml
+
+permissions:
+  contents: read
+
+jobs:
+  qualify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Capture exact source entity bytes
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import urllib.request, urllib.error, pathlib, hashlib, json, datetime, re
+
+          OUT = pathlib.Path('out_p2c_qualification_v1')
+          OUT.mkdir(exist_ok=True)
+          probes = [
+            # TWSE valuation: boundary / semantic transitions / middle / latest-complete trading day.
+            ('twse_bwibbu_20050831', 'https://www.twse.com.tw/exchangeReport/BWIBBU_d?response=json&date=20050831&selectType=ALL'),
+            ('twse_bwibbu_20050901', 'https://www.twse.com.tw/exchangeReport/BWIBBU_d?response=json&date=20050901&selectType=ALL'),
+            ('twse_bwibbu_20050902', 'https://www.twse.com.tw/exchangeReport/BWIBBU_d?response=json&date=20050902&selectType=ALL'),
+            ('twse_bwibbu_20130514', 'https://www.twse.com.tw/exchangeReport/BWIBBU_d?response=json&date=20130514&selectType=ALL'),
+            ('twse_bwibbu_20130515', 'https://www.twse.com.tw/exchangeReport/BWIBBU_d?response=json&date=20130515&selectType=ALL'),
+            ('twse_bwibbu_20130516', 'https://www.twse.com.tw/exchangeReport/BWIBBU_d?response=json&date=20130516&selectType=ALL'),
+            ('twse_bwibbu_20170411', 'https://www.twse.com.tw/exchangeReport/BWIBBU_d?response=json&date=20170411&selectType=ALL'),
+            ('twse_bwibbu_20170412', 'https://www.twse.com.tw/exchangeReport/BWIBBU_d?response=json&date=20170412&selectType=ALL'),
+            ('twse_bwibbu_20200915', 'https://www.twse.com.tw/exchangeReport/BWIBBU_d?response=json&date=20200915&selectType=ALL'),
+            ('twse_bwibbu_20260911_a', 'https://www.twse.com.tw/exchangeReport/BWIBBU_d?response=json&date=20260911&selectType=ALL'),
+            ('twse_bwibbu_20260911_b', 'https://www.twse.com.tw/exchangeReport/BWIBBU_d?response=json&date=20260911&selectType=ALL'),
+            ('twse_openapi_bwibbu_all', 'https://openapi.twse.com.tw/v1/exchangeReport/BWIBBU_ALL'),
+            ('twse_openapi_bwibbu_d', 'https://openapi.twse.com.tw/v1/exchangeReport/BWIBBU_d'),
+
+            # TPEx valuation legacy/public history and current OpenAPI.
+            ('tpex_pe_0920731', 'https://www.tpex.org.tw/web/stock/aftertrading/peratio_analysis/pera_result.php?l=zh-tw&o=json&d=092/07/31&c='),
+            ('tpex_pe_0920801', 'https://www.tpex.org.tw/web/stock/aftertrading/peratio_analysis/pera_result.php?l=zh-tw&o=json&d=092/08/01&c='),
+            ('tpex_pe_0951229', 'https://www.tpex.org.tw/web/stock/aftertrading/peratio_analysis/pera_result.php?l=zh-tw&o=json&d=095/12/29&c='),
+            ('tpex_pe_0960102', 'https://www.tpex.org.tw/web/stock/aftertrading/peratio_analysis/pera_result.php?l=zh-tw&o=json&d=096/01/02&c='),
+            ('tpex_pe_1060412', 'https://www.tpex.org.tw/web/stock/aftertrading/peratio_analysis/pera_result.php?l=zh-tw&o=json&d=106/04/12&c='),
+            ('tpex_pe_1150911_a', 'https://www.tpex.org.tw/web/stock/aftertrading/peratio_analysis/pera_result.php?l=zh-tw&o=json&d=115/09/11&c='),
+            ('tpex_pe_1150911_b', 'https://www.tpex.org.tw/web/stock/aftertrading/peratio_analysis/pera_result.php?l=zh-tw&o=json&d=115/09/11&c='),
+            ('tpex_openapi_peratio', 'https://www.tpex.org.tw/openapi/v1/tpex_mainboard_peratio_analysis'),
+
+            # MOPS financial-quality source candidates. Qualification only; no score/feature calculation.
+            ('mops_t187ap14_L', 'https://mopsfin.twse.com.tw/opendata/t187ap14_L.csv'),
+            ('mops_t187ap14_O', 'https://mopsfin.twse.com.tw/opendata/t187ap14_O.csv'),
+            ('mops_t187ap17_L', 'https://mopsfin.twse.com.tw/opendata/t187ap17_L.csv'),
+            ('mops_t187ap17_O', 'https://mopsfin.twse.com.tw/opendata/t187ap17_O.csv'),
+            ('mops_187ap17_L', 'https://mopsfin.twse.com.tw/opendata/187ap17_L.csv'),
+            ('mops_187ap17_O', 'https://mopsfin.twse.com.tw/opendata/187ap17_O.csv'),
+          ]
+
+          def classify(body, headers):
+            ct = headers.get('Content-Type','')
+            text = body[:30000].decode('utf-8', errors='replace')
+            out = {'content_type': ct, 'looks_json': False, 'looks_csv': False, 'looks_html': False,
+                   'has_no_data_marker': False, 'has_security_marker': False, 'json_top': None,
+                   'json_status': None, 'json_rows_hint': None}
+            st = text.lstrip()
+            out['looks_html'] = '<html' in st[:1000].lower() or '<table' in text.lower()
+            out['looks_csv'] = (',' in text[:2000] and ('csv' in ct.lower() or '\n' in text[:2000]))
+            markers = ['查無資料', '沒有符合條件的資料', '無符合條件資料', 'No data', 'no data']
+            out['has_no_data_marker'] = any(x in text for x in markers)
+            sec = ['Access Denied','Forbidden','captcha','驗證碼','security check','Request Rejected']
+            out['has_security_marker'] = any(x.lower() in text.lower() for x in sec)
+            try:
+              j = json.loads(body.decode('utf-8-sig'))
+              out['looks_json'] = True
+              out['json_top'] = type(j).__name__
+              if isinstance(j, dict):
+                for k in ['stat','status','message','msg']:
+                  if k in j: out['json_status'] = j[k]
+                for k in ['data','aaData','tables']:
+                  if isinstance(j.get(k), list): out['json_rows_hint'] = len(j[k]); break
+              elif isinstance(j, list):
+                out['json_rows_hint'] = len(j)
+            except Exception:
+              pass
+            return out
+
+          manifest = []
+          for i, (name, url) in enumerate(probes):
+            req = urllib.request.Request(url, headers={
+              'User-Agent': 'Mozilla/5.0 P2-C-SourceQualification/1.0',
+              'Accept': '*/*',
+              'Accept-Encoding': 'identity',
+              'Connection': 'close',
+            })
+            status = None; final_url = url; hdrs = {}; body = b''; err = None
+            started = datetime.datetime.now(datetime.timezone.utc).isoformat()
+            try:
+              with urllib.request.urlopen(req, timeout=45) as r:
+                status = r.status
+                final_url = r.geturl()
+                hdrs = dict(r.headers.items())
+                body = r.read()
+            except urllib.error.HTTPError as e:
+              status = e.code
+              final_url = e.geturl()
+              hdrs = dict(e.headers.items()) if e.headers else {}
+              body = e.read()
+              err = f'HTTPError:{e.code}'
+            except Exception as e:
+              err = f'{type(e).__name__}:{e}'
+            fetched = datetime.datetime.now(datetime.timezone.utc).isoformat()
+            sha = hashlib.sha256(body).hexdigest()
+            pfx = OUT / f'{i:02d}_{name}'
+            pfx.with_suffix('.body.bin').write_bytes(body)
+            pfx.with_suffix('.headers.json').write_text(json.dumps(hdrs, ensure_ascii=False, sort_keys=True, indent=2)+'\n')
+            cls = classify(body, hdrs)
+            meta = {
+              'probe': name, 'request_url': url, 'final_url': final_url, 'status': status,
+              'started_at_utc': started, 'fetched_at_utc': fetched, 'bytes': len(body),
+              'sha256': sha, 'error': err, 'request_headers': {
+                'User-Agent': 'Mozilla/5.0 P2-C-SourceQualification/1.0',
+                'Accept': '*/*', 'Accept-Encoding': 'identity', 'Connection': 'close'},
+              'classification': cls,
+            }
+            pfx.with_suffix('.meta.json').write_text(json.dumps(meta, ensure_ascii=False, sort_keys=True, indent=2)+'\n')
+            manifest.append(meta)
+            print(name, status, len(body), sha, cls)
+
+          # Repeat-fetch byte checks are explicit, not inferred.
+          by = {m['probe']:m for m in manifest}
+          repeat_checks = []
+          for a,b in [('twse_bwibbu_20260911_a','twse_bwibbu_20260911_b'),('tpex_pe_1150911_a','tpex_pe_1150911_b')]:
+            repeat_checks.append({
+              'a':a,'b':b,
+              'same_status': by[a]['status']==by[b]['status'],
+              'same_bytes': by[a]['bytes']==by[b]['bytes'],
+              'same_sha256': by[a]['sha256']==by[b]['sha256'],
+              'sha256_a':by[a]['sha256'],'sha256_b':by[b]['sha256'],
+            })
+          (OUT/'REPEAT_FETCH_CHECKS.json').write_text(json.dumps(repeat_checks,ensure_ascii=False,sort_keys=True,indent=2)+'\n')
+          (OUT/'QUALIFICATION_MANIFEST.json').write_text(json.dumps(manifest,ensure_ascii=False,sort_keys=True,indent=2)+'\n')
+          (OUT/'SHA256SUMS.txt').write_text(''.join(f"{m['sha256']}  {idx:02d}_{m['probe']}.body.bin\n" for idx,m in enumerate(manifest)))
+          PY
+      - name: Qualification summary
+        if: always()
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json, pathlib
+          p=pathlib.Path('out_p2c_qualification_v1/QUALIFICATION_MANIFEST.json')
+          if p.exists():
+            for m in json.loads(p.read_text()):
+              c=m['classification']
+              print(m['probe'], 'status=',m['status'],'bytes=',m['bytes'],'sha=',m['sha256'][:16],
+                    'json=',c['looks_json'],'rows=',c['json_rows_hint'],'csv=',c['looks_csv'],
+                    'html=',c['looks_html'],'no_data=',c['has_no_data_marker'],'security=',c['has_security_marker'])
+          q=pathlib.Path('out_p2c_qualification_v1/REPEAT_FETCH_CHECKS.json')
+          if q.exists(): print(q.read_text())
+          PY
+      - name: Upload qualification evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: p2c-source-qualification-v1
+          path: out_p2c_qualification_v1/
+          if-no-files-found: error
+          retention-days: 7
