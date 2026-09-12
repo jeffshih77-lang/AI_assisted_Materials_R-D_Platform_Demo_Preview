@@ -1,0 +1,27 @@
+name: P4-A cancel stale queued repairs once
+on:
+  push:
+    paths:
+      - '.github/workflows/p4a_cancel_stale_queued_repairs_once.yml'
+permissions:
+  actions: write
+  contents: read
+jobs:
+  cancel:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+    steps:
+      - name: Cancel stale P4-A source repair runs only
+        run: |
+          set -euo pipefail
+          for id in 34684440193 34684185077 34670609899; do
+            state=$(gh api "repos/$REPO/actions/runs/$id" --jq '.status')
+            concl=$(gh api "repos/$REPO/actions/runs/$id" --jq '.conclusion // ""')
+            echo "$id status=$state conclusion=$concl"
+            if [ "$state" != "completed" ]; then
+              gh api -X POST "repos/$REPO/actions/runs/$id/cancel"
+              echo "cancel requested $id"
+            fi
+          done
