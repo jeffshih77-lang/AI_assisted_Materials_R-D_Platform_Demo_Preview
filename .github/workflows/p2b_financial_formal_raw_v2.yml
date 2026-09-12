@@ -1,0 +1,148 @@
+name: P2B formal financial historical RAW v2
+on:
+  push:
+    branches: [p2b-financial-transport-20260912]
+    paths: [.github/workflows/p2b_financial_formal_raw_v2.yml]
+permissions:
+  contents: read
+jobs:
+  capture:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Capture P2-B formal RAW with corrected semantic validator
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import datetime as dt, hashlib, html, html.parser, json, pathlib, re, time, urllib.error, urllib.parse, urllib.request, zipfile
+          OUT=pathlib.Path('out'); RAW=OUT/'raw'; META=OUT/'metadata'; CTRL=OUT/'control'
+          for p in (RAW,META,CTRL): p.mkdir(parents=True,exist_ok=True)
+          HOST='mopsov.twse.com.tw'; BASE=f'https://{HOST}/mops/web/{{endpoint}}'
+          MARKETS={'TWSE':'sii','TPEX':'otc'}
+          REPORTS={
+            'PL':('t163sb04',['基本每股盈餘','每股盈餘']),
+            'BS':('t163sb05',['資產總額','資產']),
+            'CF':('t163sb20',['現金流量','營業活動']),
+            'OPR':('t163sb06',['營業利益率','毛利率','稅後純益率']),
+          }
+          START=(102,1); END=(115,2); NEXT=(115,3)
+          UA='Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/140 Safari/537.36 P2BFormalRaw/2.0'
+          def now(): return dt.datetime.now(dt.timezone.utc).isoformat().replace('+00:00','Z')
+          def sha(b): return hashlib.sha256(b).hexdigest()
+          def quarters(a,b):
+            y,q=a
+            while (y,q)<=b:
+              yield y,q
+              q+=1
+              if q==5:y+=1;q=1
+          def decode(b):
+            for e in ('utf-8-sig','utf-8','cp950','big5'):
+              try:return b.decode(e),e
+              except UnicodeDecodeError:pass
+            return b.decode('utf-8','replace'),'utf-8-replace'
+          class Cells(html.parser.HTMLParser):
+            def __init__(self): super().__init__(convert_charrefs=True); self.in_cell=False; self.buf=[]; self.cells=[]
+            def handle_starttag(self,t,a):
+              if t.lower() in ('td','th'): self.in_cell=True; self.buf=[]
+            def handle_data(self,d):
+              if self.in_cell:self.buf.append(d)
+            def handle_endtag(self,t):
+              if t.lower() in ('td','th') and self.in_cell:
+                self.cells.append(re.sub(r'\s+',' ',' '.join(self.buf)).strip()); self.in_cell=False; self.buf=[]
+          def signature(report,text):
+            p=Cells()
+            try:p.feed(text)
+            except Exception:pass
+            starts=[i for i,c in enumerate(p.cells) if re.sub(r'\s+','',c)=='公司代號']
+            marker_ok=any(m in text for m in REPORTS[report][1])
+            if not starts or not marker_ok:return {'data_cells':0,'semantic_sha256':None,'security_codes':0,'code_set_sha256':None}
+            data=p.cells[starts[0]:]
+            canonical='\x1f'.join(re.sub(r'\s+',' ',x).strip() for x in data)
+            codes=sorted(set(re.findall(r"<tr\b[^>]*>\s*<td\b[^>]*>\s*([0-9A-Za-z]{4,6})\s*</td>\s*<td\b",text,re.I|re.S)))
+            return {'data_cells':len(data),'semantic_sha256':hashlib.sha256(canonical.encode('utf-8')).hexdigest(),'security_codes':len(codes),'code_set_sha256':hashlib.sha256('\n'.join(codes).encode('utf-8')).hexdigest() if codes else None}
+          def classify(report,b,status):
+            text,enc=decode(b); compact=re.sub(r'\s+','',text); low=text.lower()
+            nd=any(x in compact for x in ('查無資料','無符合條件之資料','沒有資料','無資料'))
+            blk=('for security reasons' in low or '因為安全性考量' in text or 'access denied' in low or '驗證碼' in text or 'captcha' in low)
+            sig=signature(report,text)
+            valid=(status==200 and len(b)>2000 and not nd and not blk and sig['semantic_sha256'] is not None and sig['security_codes']>0)
+            kind='DATA' if valid else ('NO_DATA' if nd else ('SECURITY_BLOCK' if blk else ('TRANSPORT_ERROR' if status is None else ('NO_DATA_HTTP' if status in (404,410) else 'INVALID_OR_TEMPLATE'))))
+            return valid,kind,enc,sig
+          def request(url,form,mode):
+            u=url; data=None; h={'User-Agent':UA,'Accept':'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8','Referer':url}
+            if mode=='POST': data=urllib.parse.urlencode(form).encode('ascii'); h['Content-Type']='application/x-www-form-urlencoded'
+            else:u=url+'?'+urllib.parse.urlencode(form)
+            at=now()
+            try:
+              with urllib.request.urlopen(urllib.request.Request(u,data=data,method=mode,headers=h),timeout=35) as r:return {'ok':True,'status':r.status,'body':r.read(),'headers':dict(r.headers.items()),'final_url':r.geturl(),'retrieved_at':at,'mode':mode,'request_url':u,'error':None}
+            except urllib.error.HTTPError as e:return {'ok':True,'status':e.code,'body':e.read(),'headers':dict(e.headers.items()) if e.headers else {},'final_url':u,'retrieved_at':at,'mode':mode,'request_url':u,'error':repr(e)}
+            except Exception as e:return {'ok':False,'status':None,'body':b'','headers':{},'final_url':u,'retrieved_at':at,'mode':mode,'request_url':u,'error':repr(e)}
+          def fetch(report,market,y,q,want_data=True):
+            ep=REPORTS[report][0]; url=BASE.format(endpoint=ep); form={'encodeURIComponent':'1','step':'1','firstin':'1','off':'1','TYPEK':MARKETS[market],'year':str(y),'season':f'{q:02d}'}; attempts=[]
+            for mode in ('POST','GET'):
+              for n in (1,2):
+                r=request(url,form,mode); valid,kind,enc,sig=classify(report,r['body'],r['status'])
+                attempts.append({'mode':mode,'attempt':n,'status':r['status'],'bytes':len(r['body']),'sha256':sha(r['body']) if r['body'] else None,'classification':kind,'semantic_signature':sig,'error':r['error']})
+                if (want_data and valid) or ((not want_data) and kind=='NO_DATA'):
+                  r.update({'valid':valid,'classification':kind,'encoding':enc,'semantic_signature':sig,'form':form,'attempts':attempts});return r
+                time.sleep(.7*n)
+            r.update({'valid':False,'classification':kind,'encoding':enc,'semantic_signature':sig,'form':form,'attempts':attempts});return r
+
+          qualification=[]; repeatability=[]; boundary=[]
+          for market in MARKETS:
+            for report in REPORTS:
+              for y,q in ((102,1),(108,2),(115,2)):
+                r=fetch(report,market,y,q,True); row={'market':market,'report':report,'roc_year':y,'quarter':q,'status':r['status'],'bytes':len(r['body']),'payload_sha256':sha(r['body']) if r['body'] else None,'valid':r['valid'],'classification':r['classification'],'encoding':r['encoding'],'semantic_signature':r['semantic_signature'],'mode':r['mode'],'form':r['form'],'retrieved_at':r['retrieved_at'],'attempts':r['attempts']};qualification.append(row)
+                if not r['valid']:raise SystemExit('QUALIFICATION_FAIL '+json.dumps(row,ensure_ascii=False))
+              a=fetch(report,market,115,2,True);time.sleep(.3);b=fetch(report,market,115,2,True)
+              rep={'market':market,'report':report,'semantic_identical':a['semantic_signature']['semantic_sha256']==b['semantic_signature']['semantic_sha256'],'code_set_identical':a['semantic_signature']['code_set_sha256']==b['semantic_signature']['code_set_sha256'],'first_semantic_sha256':a['semantic_signature']['semantic_sha256'],'second_semantic_sha256':b['semantic_signature']['semantic_sha256'],'byte_identical':a['body']==b['body']};repeatability.append(rep)
+              if not rep['semantic_identical'] or not rep['code_set_identical']:raise SystemExit('REPEATABILITY_FAIL '+json.dumps(rep,ensure_ascii=False))
+              n=fetch(report,market,NEXT[0],NEXT[1],False);br={'market':market,'report':report,'roc_year':NEXT[0],'quarter':NEXT[1],'classification':n['classification'],'status':n['status'],'bytes':len(n['body']),'sha256':sha(n['body']) if n['body'] else None};boundary.append(br)
+              if n['classification']!='NO_DATA':raise SystemExit('BOUNDARY_FAIL '+json.dumps(br,ensure_ascii=False))
+
+          ledger=[]; anomalies=[]; payload_count=0; payload_bytes=0
+          for market in MARKETS:
+            for y,q in quarters(START,END):
+              members=[]
+              for report in REPORTS:
+                r=fetch(report,market,y,q,True)
+                if not r['valid']:
+                  anomalies.append({'market':market,'report':report,'roc_year':y,'quarter':q,'classification':r['classification'],'attempts':r['attempts']});continue
+                rd=RAW/market/f'ROC{y:03d}Q{q}';md=META/market/f'ROC{y:03d}Q{q}';rd.mkdir(parents=True,exist_ok=True);md.mkdir(parents=True,exist_ok=True)
+                rp=rd/f'{report}.response.bin';mp=md/f'{report}.capture.json';rp.write_bytes(r['body'])
+                meta={'schema':'p2b_exact_http_capture_v1','dataset':'FINANCIAL_STATEMENTS_EPS','work_unit_id':f'P2B-{market}-ROC{y:03d}Q{q}','market':market,'roc_year':y,'quarter':q,'report':report,'source_family':'MOPSOV_IFRS_MARKET_QUARTER_AGGREGATE','schema_family':'MOPS_IFRS_AGGREGATE_HTML_V1','official_host':HOST,'method':r['mode'],'request_url':r['request_url'],'request_form':r['form'],'final_url':r['final_url'],'retrieved_at':r['retrieved_at'],'published_at':'unknown','available_at':'unknown','period_semantics':'source-preserved report-period/cumulative semantics; no single-quarter derivation in RAW','restatement_semantics':'current official historical aggregate view at retrieval; original filing-version chronology not exposed','http_status':r['status'],'response_headers':r['headers'],'payload_bytes':len(r['body']),'payload_sha256':sha(r['body']),'encoding_detected':r['encoding'],'semantic_signature':r['semantic_signature'],'raw_semantics':'exact HTTP response body bytes','classification':'FORMAL_RAW_CANDIDATE_PENDING_DRIVE_READBACK','transport_attempts':r['attempts']};mp.write_text(json.dumps(meta,ensure_ascii=False,indent=2,sort_keys=True)+'\n',encoding='utf-8')
+                members.append({'report':report,'payload_bytes':len(r['body']),'payload_sha256':sha(r['body']),'semantic_sha256':r['semantic_signature']['semantic_sha256'],'raw_path':str(rp.relative_to(OUT)),'metadata_path':str(mp.relative_to(OUT)),'request_mode':r['mode']});payload_count+=1;payload_bytes+=len(r['body']);time.sleep(.06)
+              ledger.append({'work_unit_id':f'P2B-{market}-ROC{y:03d}Q{q}','market':market,'roc_year':y,'quarter':q,'status':'RAW_CAPTURED_PENDING_CLOUD_VERIFY' if len(members)==4 else 'INCOMPLETE_ANOMALY','members':members})
+          incomplete=[x for x in ledger if x['status']!='RAW_CAPTURED_PENDING_CLOUD_VERIFY']
+          if incomplete:raise SystemExit('COVERAGE_GAP '+json.dumps(incomplete[:20],ensure_ascii=False))
+          if len(ledger)!=108 or payload_count!=432:raise SystemExit(f'COUNT_MISMATCH wus={len(ledger)} payloads={payload_count}')
+
+          source_boundaries=['PRE_IFRS_SEPARATE_SCHEMA_REGIME_NOT_INCLUDED_V1','AGGREGATE_SOURCE_DOES_NOT_PRESERVE_ORIGINAL_FILING_VERSION_OR_POINT_IN_TIME_AVAILABLE_AT']
+          contract={'schema':'p2b_source_contract_v1','version':'P2-B-SOURCE-CONTRACT-v1','status':'FROZEN','dataset':'FINANCIAL_STATEMENTS_EPS','source_family':'MOPSOV_IFRS_MARKET_QUARTER_AGGREGATE','schema_family':'MOPS_IFRS_AGGREGATE_HTML_V1','official_host':HOST,'reports':{k:v[0] for k,v in REPORTS.items()},'market_mapping':MARKETS,'work_unit':'market x quarter/reporting-period','formal_coverage':{'start':'ROC102-Q1','end':'ROC115-Q2','work_units':108,'raw_payloads':432},'latest_complete_period_qualified':'ROC115-Q2 / 2026Q2','next_period_boundary':'ROC115-Q3 official NO_DATA','source_boundaries':source_boundaries,'published_at':'unknown','available_at':'unknown','period_semantics':'source-preserved cumulative/report-context; no single-quarter derivation in RAW','repeatability':'normalized financial cell-stream fingerprint + first-cell security-code set','raw_preservation':'exact response bytes + request/response metadata + SHA256','immutable_raw':True}
+          qdoc={'schema':'p2b_source_qualification_v1','status':'PASS_WITH_SOURCE_BOUNDARY','samples':qualification,'repeatability':repeatability,'latest_boundary':boundary,'legacy_supplement':'117-row nine-stock Supplement retained as lineage only; not formal RAW'}
+          coverage={'schema':'p2b_coverage_v1','markets':{'TWSE':{'first':'ROC102-Q1','last':'ROC115-Q2','work_units':54,'internal_gaps':0},'TPEX':{'first':'ROC102-Q1','last':'ROC115-Q2','work_units':54,'internal_gaps':0}},'total_work_units':108,'raw_payloads':432,'latest_complete_gregorian':'2026Q2','source_boundaries':source_boundaries,'open_unclassified_true_gaps':0,'status':'HISTORICAL_BASE_CAPTURED_WITH_SOURCE_BOUNDARY_PENDING_CLOUD_VERIFY'}
+          manifest={'schema':'p2b_manifest_v1','dataset':'FINANCIAL_STATEMENTS_EPS','claimant_id':'P2-B-CHAT-20260912-1732','source_contract_version':'P2-B-SOURCE-CONTRACT-v1','generated_at':now(),'coverage':coverage,'work_units':108,'raw_payload_files':432,'payload_bytes':payload_bytes,'members':ledger,'formal_state':'HISTORICAL_BASE_CAPTURED_WITH_SOURCE_BOUNDARY_PENDING_CLOUD_VERIFY'}
+          controls={'P2B_SOURCE_CONTRACT.json':contract,'P2B_SOURCE_QUALIFICATION.json':qdoc,'P2B_WORK_UNIT_LEDGER.json':{'schema':'p2b_work_unit_ledger_v1','work_units':ledger},'P2B_COVERAGE.json':coverage,'P2B_ANOMALY_LEDGER.json':{'schema':'p2b_anomaly_ledger_v1','capture_anomalies':anomalies,'qualified_boundary_no_data':boundary,'unclassified_true_gaps':[],'source_boundaries':source_boundaries},'P2B_MANIFEST.json':manifest}
+          for n,o in controls.items():(CTRL/n).write_text(json.dumps(o,ensure_ascii=False,indent=2,sort_keys=True)+'\n',encoding='utf-8')
+          package=OUT/'P2B_FINANCIAL_STATEMENTS_EPS_FORMAL_RAW_20260912.zip'; files=sorted(p for root in (RAW,META,CTRL) for p in root.rglob('*') if p.is_file())
+          with zipfile.ZipFile(package,'w',compression=zipfile.ZIP_DEFLATED,compresslevel=9) as z:
+            for p in files:z.write(p,p.relative_to(OUT).as_posix())
+          with zipfile.ZipFile(package) as z:
+            bad=z.testzip()
+            if bad:raise SystemExit('ZIP_INTEGRITY_FAIL '+bad)
+          psha=sha(package.read_bytes());info={'schema':'p2b_package_info_v1','file_name':package.name,'bytes':package.stat().st_size,'sha256':psha,'member_count':len(files),'raw_payload_files':432,'metadata_files':432,'control_files':6,'work_units':108,'payload_bytes':payload_bytes,'zip_integrity':'PASS','formal_status':'PENDING_DRIVE_UPLOAD_AND_READBACK'}
+          (OUT/'P2B_PACKAGE_INFO.json').write_text(json.dumps(info,ensure_ascii=False,indent=2,sort_keys=True)+'\n',encoding='utf-8');(OUT/'SHA256SUMS.txt').write_text(f'{psha}  {package.name}\n',encoding='utf-8')
+          print(json.dumps({'qualification':'PASS_WITH_SOURCE_BOUNDARY','work_units':108,'raw_payload_files':432,'payload_bytes':payload_bytes,'package_bytes':package.stat().st_size,'package_sha256':psha,'zip_integrity':'PASS'},ensure_ascii=False))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: P2B_FINANCIAL_STATEMENTS_EPS_FORMAL_RAW_20260912_V2
+          path: |
+            out/P2B_FINANCIAL_STATEMENTS_EPS_FORMAL_RAW_20260912.zip
+            out/P2B_PACKAGE_INFO.json
+            out/SHA256SUMS.txt
+            out/control/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
