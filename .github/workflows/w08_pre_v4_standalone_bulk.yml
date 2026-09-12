@@ -1,0 +1,32 @@
+name: W08 PRE20050505 standalone bulk leader
+on:
+  push:
+    branches: [w08-final-free-source-20260912]
+    paths:
+      - '.github/workflows/w08_pre_v4_standalone_bulk.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  bulk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    env:
+      SHARD: '63'
+      SHARDS: '64'
+      BULK_STANDALONE: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: w08-final-free-source-20260912
+      - name: Capture all frozen deferred PRE shards exactly once
+        run: python3 w08_public_runner/w08_t59_pre20050505_formal_v4_tail.py
+      - name: Upload immutable bulk tail evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: w08-t59-pre-v4-tail-standalone-bulk
+          path: out_t59_pre_v4_*/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 6
