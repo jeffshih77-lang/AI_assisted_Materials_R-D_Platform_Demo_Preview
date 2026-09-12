@@ -1,0 +1,70 @@
+name: P2D Yvictor sorted historical raw backfill
+on:
+  push:
+    branches: [p2d-free-broker-qual-20260912]
+    paths:
+      - '.github/workflows/p2d_yvictor_sort_full_backfill.yml'
+  workflow_dispatch:
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Fetch and validate byte-exact sorted raw members
+        shell: python
+        run: |
+          import csv, hashlib, json, os, urllib.request
+          base='https://raw.githubusercontent.com/Yvictor/brokerBSreport_crawler/47ece3474e8110e5e9749d557842673f57d1fc90/data/stockdt/sort/'
+          expected={
+            '2448.csv':('2a7d04c880124e8838fe39c6405858c485ad5f7a',8261725),
+            '2498.csv':('bbdcc4fdbce3b59ab983bc3c222268f1d844d827',10898469),
+            '2543.csv':('fb6154aa333f2e9349fde2f812fd8ac1416433f4',267664),
+            '2616.csv':('e3dee77e4c250607e7b5b11d8bbd3ba90f85d6e1',572469),
+            '3432.csv':('36d2a284d0f5a598e19c6f7f78750c103fcafcdb',281827),
+            '4526.csv':('c88f02cf9baa120aae6528fd15b58dafee0ea765',1310860),
+            '4906.csv':('a39b274548ea87bcd3085de0f2920f16bc82edbe',3207940),
+            '6205.csv':('16138c6b26371eb4c1c5f3daf36699bbc5e1c828',643933),
+            '7402.csv':('ad7df0c026aa8b8fec714ec1d9779718bc8071cc',457949),
+            '8084.csv':('9744e0baba72f95a175c417d1547155abc7ff040',180959),
+            '8150.csv':('1c74ea13c90ac7fb59906da2e8a2a034d0dd276f',988244),
+            '9943.csv':('f045e093175e008110cd7aa4313c88d3f0218e9b',1519025),
+          }
+          os.makedirs('p2d_sort_output',exist_ok=True)
+          manifest=[]
+          required=['日期','代號','證券商','成交單價','買進股數','賣出股數']
+          for fn,(blob_sha,expected_size) in expected.items():
+            url=base+fn
+            with urllib.request.urlopen(url,timeout=60) as r:
+              b=r.read()
+            if len(b)!=expected_size: raise SystemExit(f'{fn} size mismatch {len(b)} != {expected_size}')
+            git_sha=hashlib.sha1(f'blob {len(b)}\0'.encode()+b).hexdigest()
+            if git_sha!=blob_sha: raise SystemExit(f'{fn} git blob mismatch {git_sha} != {blob_sha}')
+            out='p2d_sort_output/'+fn
+            open(out,'wb').write(b)
+            text=b.decode('utf-8-sig')
+            reader=csv.DictReader(text.splitlines())
+            if not reader.fieldnames or any(c not in reader.fieldnames for c in required):
+              raise SystemExit(f'{fn} missing required columns: {reader.fieldnames}')
+            rows=0; dates=set(); stocks=set(); brokers=set(); nulls=0
+            for row in reader:
+              rows+=1
+              dates.add(row['日期']); stocks.add(row['代號']); brokers.add(row['證券商'])
+              nulls += sum(1 for c in required if row.get(c) in (None,''))
+            if rows==0: raise SystemExit(f'{fn} has zero rows')
+            manifest.append({
+              'file':fn,'source_url':url,'bytes':len(b),'git_blob_sha1':git_sha,
+              'sha256':hashlib.sha256(b).hexdigest(),'rows':rows,
+              'date_min':min(dates),'date_max':max(dates),'unique_dates':len(dates),
+              'stock_ids':sorted(stocks),'unique_broker_codes':len(brokers),
+              'required_core_null_cells':nulls,'columns':reader.fieldnames
+            })
+          open('p2d_sort_output/manifest.json','w',encoding='utf-8').write(json.dumps(manifest,ensure_ascii=False,indent=2))
+          print(json.dumps(manifest,ensure_ascii=False,indent=2))
+      - name: Upload validated sorted raw members
+        uses: actions/upload-artifact@v4
+        with:
+          name: p2d-yvictor-sort-full
+          path: p2d_sort_output/
+          if-no-files-found: error
+          retention-days: 14
