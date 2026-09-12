@@ -1,0 +1,134 @@
+name: P4-A V5 auto residual retry after HT 20260912
+on:
+  workflow_run:
+    workflows: ["P4-A V5 residual 10p highthroughput 20260912"]
+    types: [completed]
+permissions:
+  actions: read
+  contents: read
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      m1: ${{ steps.plan.outputs.m1 }}
+      m2: ${{ steps.plan.outputs.m2 }}
+      m3: ${{ steps.plan.outputs.m3 }}
+      m4: ${{ steps.plan.outputs.m4 }}
+      item_count: ${{ steps.plan.outputs.item_count }}
+      residual_pages: ${{ steps.plan.outputs.residual_pages }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      ACCEL_RUN: '34685276466'
+      HT_RUN: ${{ github.event.workflow_run.id }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: plan
+        run: |
+          set -euo pipefail
+          test "$HT_RUN" = "34685616731"
+          for R in "$ACCEL_RUN" "$HT_RUN"; do gh api "repos/$REPO/actions/runs/$R/artifacts?per_page=100" --paginate --slurp > "artifacts-$R.json"; done
+          python - <<'PY'
+          import json,re,os
+          p=json.load(open('p4a_runner/P4A_EXACT_MISSING_PLAN_V5_20260912.json'))
+          required={(int(r['roc']),r['kind'],x) for r in p['runs'] for x in range(int(r['start']),int(r['end'])+1)}
+          assert len(required)==8425
+          pats=[re.compile(r'^p4a-v5a-gap-ROC(\d+)-([LO])-P(\d+)-(\d+)$'),re.compile(r'^p4a-v5r-gap-ROC(\d+)-([LO])-P(\d+)-(\d+)$')]
+          done=set()
+          for R in (os.environ['ACCEL_RUN'],os.environ['HT_RUN']):
+            pages=json.load(open(f'artifacts-{R}.json')); arts=[]
+            for o in pages: arts+=o.get('artifacts',[])
+            for a in arts:
+              if a.get('expired'): continue
+              m=next((q.match(a.get('name','')) for q in pats if q.match(a.get('name',''))),None)
+              if not m: continue
+              y=int(m.group(1)); k=m.group(2); s=int(m.group(3)); e=int(m.group(4)); rng={(y,k,x) for x in range(s,e+1)}
+              assert rng<=required
+              done|=rng
+          residual=required-done
+          items=[]
+          for y in range(81,116):
+            for k in ('L','O'):
+              ps=sorted(x for yy,kk,x in residual if yy==y and kk==k)
+              if not ps: continue
+              runs=[]; s=pr=ps[0]
+              for x in ps[1:]:
+                if x==pr+1: pr=x
+                else: runs.append((s,pr)); s=pr=x
+              runs.append((s,pr))
+              for s,e in runs:
+                q=s
+                while q<=e:
+                  z=min(e,q+4); items.append({'roc':y,'kind':k,'start':q,'end':z,'page_count':z-q+1}); q=z+1
+          assert sum(x['page_count'] for x in items)==len(residual)
+          groups=[items[i::4] for i in range(4)]
+          # GitHub matrix needs a non-empty include shape even when no residual; jobs are gated by item_count.
+          for i,g in enumerate(groups):
+            if not g: groups[i]=[{'roc':115,'kind':'O','start':0,'end':0,'page_count':1,'noop':True}]
+          with open(os.environ['GITHUB_OUTPUT'],'a') as f:
+            for i,g in enumerate(groups,1): f.write(f'm{i}='+json.dumps({'include':g},separators=(',',':'))+'\n')
+            f.write('item_count='+str(len(items))+'\n'); f.write('residual_pages='+str(len(residual))+'\n')
+          print('successful unique pages',len(done),'residual',len(residual),'retry items',len(items))
+          PY
+  retry1:
+    needs: plan
+    if: ${{ needs.plan.outputs.item_count != '0' }}
+    strategy: {fail-fast: false, max-parallel: 4, matrix: "${{ fromJson(needs.plan.outputs.m1) }}"}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env: &envs {ROC_YEAR: "${{ matrix.roc }}", KIND: "${{ matrix.kind }}", START_PAGE: "${{ matrix.start }}", END_PAGE: "${{ matrix.end }}", DETAIL_WORKERS: '8'}
+    steps: &steps
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - name: Capture residual only
+        run: |
+          set -euo pipefail
+          cp p4a_runner/p4a_material_info_page_chunk_v4.py /tmp/p4a_collector.py
+          sed -i 's/def get(url, retries=3):/def get(url, retries=20):/' /tmp/p4a_collector.py
+          python /tmp/p4a_collector.py
+      - name: Validate V4 fail closed
+        run: |
+          python - <<'PY'
+          import json,os,pathlib
+          r=next(p for p in pathlib.Path('out_p4a_chunk').iterdir() if p.is_dir()); m=json.load(open(r/'MANIFEST.json')); a=m['assertions']; c=m['coverage']
+          s=int(os.environ['START_PAGE']); e=int(os.environ['END_PAGE']); y=int(os.environ['ROC_YEAR']); k=os.environ['KIND']
+          assert m['schema']=='p4a_material_info_page_chunk_v4' and (int(c['roc_year']),c['kind'],int(c['start_page']),int(c['end_page']))==(y,k,s,e)
+          assert int(a['page_count'])==e-s+1 and int(a['list_capture_count'])==e-s+1 and a['all_http_200'] is True and a['all_payload_nonempty'] is True
+          assert int(a['nonstandard_detail_count'])==len(m.get('anomalies',[])); assert all(x.get('disposition')=='PRESERVE_RAW_DO_NOT_ZERO_FILL' for x in m.get('anomalies',[]))
+          PY
+      - name: Package
+        run: |
+          python - <<'PY'
+          import pathlib,zipfile
+          r=next(p for p in pathlib.Path('out_p4a_chunk').iterdir() if p.is_dir()); o=pathlib.Path(r.name+'.zip')
+          with zipfile.ZipFile(o,'w',zipfile.ZIP_DEFLATED) as z:
+            for p in sorted(r.rglob('*')):
+              if p.is_file(): z.write(p,p.relative_to(r.parent))
+          PY
+      - uses: actions/upload-artifact@v4
+        with: {name: "p4a-v5rr-gap-ROC${{ matrix.roc }}-${{ matrix.kind }}-P${{ matrix.start }}-${{ matrix.end }}", path: "P4A-MATERIAL-ROC${{ matrix.roc }}-${{ matrix.kind }}-P*.zip", if-no-files-found: error, retention-days: 3}
+  retry2:
+    needs: plan
+    if: ${{ needs.plan.outputs.item_count != '0' }}
+    strategy: {fail-fast: false, max-parallel: 4, matrix: "${{ fromJson(needs.plan.outputs.m2) }}"}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env: *envs
+    steps: *steps
+  retry3:
+    needs: plan
+    if: ${{ needs.plan.outputs.item_count != '0' }}
+    strategy: {fail-fast: false, max-parallel: 4, matrix: "${{ fromJson(needs.plan.outputs.m3) }}"}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env: *envs
+    steps: *steps
+  retry4:
+    needs: plan
+    if: ${{ needs.plan.outputs.item_count != '0' }}
+    strategy: {fail-fast: false, max-parallel: 4, matrix: "${{ fromJson(needs.plan.outputs.m4) }}"}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env: *envs
+    steps: *steps
