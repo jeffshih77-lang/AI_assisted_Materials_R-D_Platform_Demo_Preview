@@ -1,0 +1,71 @@
+name: P2B XBRL archive session probe
+
+on:
+  push:
+    branches: [p2b-financial-transport-20260912]
+    paths: [.github/workflows/p2b_xbrl_archive_session_probe.yml]
+
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Probe quarterly archive through qualified MOPSOV session
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import http.cookiejar, urllib.request, urllib.error, pathlib, hashlib, json, zipfile, io, time
+          out=pathlib.Path('archive_probe'); out.mkdir(exist_ok=True)
+          ua='Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/140 Safari/537.36'
+          cj=http.cookiejar.CookieJar(); op=urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cj))
+          landing='https://mopsov.twse.com.tw/server-java/t164sb01?step=1&CO_ID=2330&SYEAR=2026&SSEASON=2&REPORT_ID=C'
+          def req(url, referer=None):
+            h={'User-Agent':ua,'Accept':'application/zip,application/octet-stream,text/html,*/*'}
+            if referer: h['Referer']=referer
+            try:
+              with op.open(urllib.request.Request(url,headers=h),timeout=90) as r:
+                return r.status,r.read(),dict(r.headers.items()),r.geturl(),None
+            except urllib.error.HTTPError as e:
+              return e.code,e.read(),dict(e.headers.items()) if e.headers else {},url,repr(e)
+            except Exception as e:
+              return None,b'',{},url,repr(e)
+          st,b,h,final,err=req(landing)
+          (out/'landing.bin').write_bytes(b)
+          print('LANDING',st,len(b),[(c.name,c.value,c.domain,c.path) for c in cj])
+          periods=[(2013,1),(2019,2),(2025,4),(2026,2),(2026,3)]
+          rows=[]
+          for y,q in periods:
+            filename=f'tifrs-{y}Q{q}.zip'
+            urls=[
+              f'https://mopsov.twse.com.tw/nas/ifrs/{y}/{filename}',
+              f'https://mopsov.twse.com.tw/server-java/FileDownLoad?step=9&fileName={filename}&filePath=/home/html/nas/ifrs/{y}/',
+              f'https://mopsov.twse.com.tw/mops/server-java/FileDownLoad?step=9&fileName={filename}&filePath=/home/html/nas/ifrs/{y}/',
+              f'https://mops.twse.com.tw/server-java/FileDownLoad?step=9&fileName={filename}&filePath=/home/html/nas/ifrs/{y}/',
+            ]
+            referers=[landing,'https://mopsov.twse.com.tw/mops/web/t203sb01','https://mops.twse.com.tw/mops/web/t203sb01']
+            for ui,url in enumerate(urls,1):
+              for ri,ref in enumerate(referers,1):
+                st,b,h,final,err=req(url,ref)
+                iszip=b[:4]==b'PK\x03\x04'; names=[]; bad=None
+                if iszip:
+                  try:
+                    with zipfile.ZipFile(io.BytesIO(b)) as z: names=z.namelist(); bad=z.testzip()
+                  except Exception as e: bad=repr(e)
+                row={'year':y,'quarter':q,'url_variant':ui,'referer_variant':ri,'url':url,'referer':ref,'status':st,'bytes':len(b),'sha256':hashlib.sha256(b).hexdigest() if b else None,'is_zip':iszip,'zip_members':len(names),'first_members':names[:20],'bad_member':bad,'content_type':h.get('Content-Type'),'content_disposition':h.get('Content-Disposition'),'final_url':final,'error':err,'head_text':b[:300].decode('utf-8','replace')}
+                rows.append(row); (out/f'{y}Q{q}_u{ui}_r{ri}.bin').write_bytes(b)
+                print(json.dumps({k:row[k] for k in ['year','quarter','url_variant','referer_variant','status','bytes','is_zip','zip_members','bad_member','content_type','content_disposition','final_url','head_text']},ensure_ascii=False))
+                if iszip and not bad: break
+                time.sleep(.08)
+              if rows[-1]['is_zip'] and not rows[-1]['bad_member']: break
+          (out/'probe.json').write_text(json.dumps(rows,ensure_ascii=False,indent=2),encoding='utf-8')
+          PY
+      - name: Upload archive probe
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: P2B_XBRL_ARCHIVE_SESSION_PROBE_20260912
+          path: archive_probe/
+          retention-days: 3
