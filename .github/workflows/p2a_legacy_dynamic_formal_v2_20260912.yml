@@ -1,0 +1,198 @@
+name: P2A formal legacy dynamic full-market v2
+
+on:
+  push:
+    branches: [p2a-transport-20260912]
+    paths: [.github/workflows/p2a_legacy_dynamic_formal_v2_20260912.yml]
+
+permissions:
+  contents: write
+
+jobs:
+  formal-legacy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: p2a-transport-20260912
+      - name: Capture and qualify official full-market legacy monthly revenue
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p legacy_v2 p2a-results
+          python3 - <<'PY'
+          import collections, datetime as dt, hashlib, html as htmlmod, http.cookiejar, json, os, pathlib, re, time, urllib.error, urllib.parse, urllib.request, zipfile
+
+          CLAIMANT='P2-A-CHAT-20260912-1922'
+          OUT=pathlib.Path('legacy_v2'); RAW=OUT/'raw'; META=OUT/'metadata'; CTRL=OUT/'control'; EVID=OUT/'evidence'
+          for p in (RAW,META,CTRL,EVID): p.mkdir(parents=True,exist_ok=True)
+          MARKETS={'TWSE':'sii','TPEX':'otc'}; SCAN_START=(85,1); FORMAL_END=(101,12)
+          FORM_URL='https://mops.twse.com.tw/mops/web/t21sc03'; AJAX_URL='https://mops.twse.com.tw/mops/web/ajax_t21sc03'
+          STATIC='https://mopsov.twse.com.tw/nas/t21/{code}/t21sc03_{y}_{m}{suffix}.html'
+          CSV='https://mopsov.twse.com.tw/nas/t21/{code}/t21sc03_{y}_{m}.csv'
+          UA='Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120 Safari/537.36'
+          jar=http.cookiejar.CookieJar(); opener=urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
+
+          def sha(b): return hashlib.sha256(b).hexdigest()
+          def months(a,b):
+            y,m=a
+            while (y,m)<=b:
+              yield y,m
+              m+=1
+              if m==13:y+=1;m=1
+          def decode(b):
+            for enc in ('utf-8','utf-8-sig','big5','cp950'):
+              try:return b.decode(enc),enc
+              except UnicodeDecodeError:pass
+            return b.decode('utf-8',errors='replace'),'utf-8-replace'
+          def clean(x): return htmlmod.unescape(re.sub(r'<[^>]*>','',x)).replace('\xa0',' ').strip()
+          def validate_html(b):
+            if len(b)<300:return {'valid':False,'classification':'RESPONSE_TOO_SHORT','encoding':None,'rows':0,'unique_codes':0,'schema_family':None,'widths':[],'blocked':False}
+            text,enc=decode(b); blocked=('FOR SECURITY REASONS' in text or '安全性考量' in text or 'THIS PAGE CAN NOT BE ACCESSED' in text)
+            if blocked:return {'valid':False,'classification':'WAF_BLOCK','encoding':enc,'rows':0,'unique_codes':0,'schema_family':None,'widths':[],'blocked':True}
+            codes=[]; widths=[]
+            for tr in re.findall(r'<tr\b[^>]*>([\s\S]*?)</tr>',text,re.I):
+              cells=[clean(x) for x in re.findall(r'<t[dh]\b[^>]*>([\s\S]*?)</t[dh]>',tr,re.I)]
+              found=False
+              for x in cells[:4]:
+                if re.fullmatch(r'\d{4,6}',x): codes.append(x); widths.append(len(cells)); found=True; break
+            title=('營業收入' in text or '每月營收' in text)
+            if not codes:return {'valid':False,'classification':'NO_COMPANY_ROWS' if title else 'NON_DATA_TEMPLATE','encoding':enc,'rows':0,'unique_codes':0,'schema_family':None,'widths':[],'blocked':False}
+            w=set(widths)
+            schema='MOPS_T21_LEGACY_HTML_11COL' if w and min(w)>=11 else 'MOPS_T21_LEGACY_HTML_V10'
+            return {'valid':bool(title and len(set(codes))>=5),'classification':'DATA' if title and len(set(codes))>=5 else 'INSUFFICIENT_ROWS','encoding':enc,'rows':len(codes),'unique_codes':len(set(codes)),'schema_family':schema,'widths':sorted(w),'blocked':False}
+          def validate_csv(b):
+            if len(b)<300:return {'valid':False,'classification':'RESPONSE_TOO_SHORT','encoding':None,'rows':0,'unique_codes':0,'schema_family':'MOPS_T21_CSV'}
+            text,enc=decode(b)
+            if '<html' in text[:1000].lower():return {'valid':False,'classification':'HTML_TEMPLATE_NOT_CSV','encoding':enc,'rows':0,'unique_codes':0,'schema_family':'MOPS_T21_CSV'}
+            codes=[]
+            for ln in text.splitlines():
+              cols=[c.strip().strip('"') for c in ln.split(',')]
+              for c in cols[:4]:
+                if re.fullmatch(r'\d{4,6}',c): codes.append(c); break
+            ok=len(set(codes))>=5
+            return {'valid':ok,'classification':'DATA' if ok else 'NO_COMPANY_ROWS','encoding':enc,'rows':len(codes),'unique_codes':len(set(codes)),'schema_family':'MOPS_T21_CSV'}
+          def request(url,method='GET',form=None,tries=4):
+            last=None
+            for i in range(tries):
+              at=dt.datetime.now(dt.timezone.utc).isoformat().replace('+00:00','Z')
+              try:
+                data=urllib.parse.urlencode(form).encode() if form is not None else None
+                req=urllib.request.Request(url,data=data,headers={'User-Agent':UA,'Referer':FORM_URL,'Accept':'text/html,text/csv,*/*','Content-Type':'application/x-www-form-urlencoded','Connection':'close'},method=method)
+                with opener.open(req,timeout=25) as r:
+                  body=r.read(); return {'transport_ok':True,'status':getattr(r,'status',200),'body':body,'headers':dict(r.headers.items()),'final_url':r.geturl(),'retrieved_at':at}
+              except urllib.error.HTTPError as e:
+                body=e.read() if hasattr(e,'read') else b''
+                if e.code in (400,403,404,410):return {'transport_ok':True,'status':e.code,'body':body,'headers':dict(e.headers.items()) if e.headers else {},'final_url':url,'retrieved_at':at}
+                last=f'HTTP {e.code}'
+              except Exception as e:last=repr(e)
+              if i<tries-1: time.sleep(min(3,1.4**i))
+            return {'transport_ok':False,'status':None,'body':b'','headers':{},'final_url':url,'retrieved_at':at,'error':last}
+          def prime():
+            try:
+              r=request(FORM_URL,'GET',None,2); return {'ok':r['transport_ok'] and r['status']==200,'status':r['status'],'bytes':len(r['body']),'sha256':sha(r['body']) if r['body'] else None,'retrieved_at':r['retrieved_at']}
+            except Exception as e:return {'ok':False,'error':repr(e)}
+          def form(code,y,m): return {'encodeURIComponent':'1','step':'1','firstin':'1','off':'1','TYPEK':code,'year':str(y),'month':str(m)}
+          def save_capture(market,y,m,label,r,v,formal_role,base=RAW):
+            d=base/market; md=META/market; d.mkdir(parents=True,exist_ok=True); md.mkdir(parents=True,exist_ok=True)
+            raw_path=None
+            if r['body']:
+              rp=d/f'{y:03d}_{m:02d}_{label}.response.bin'; rp.write_bytes(r['body']); raw_path=str(rp.relative_to(OUT))
+            meta={'schema':'p2a_exact_http_capture_v3','dataset':'MONTHLY_REVENUE','claimant_id':CLAIMANT,'market':market,'roc_year':y,'month':m,'source_route':label,'source_family':'MOPS_OFFICIAL_MONTHLY_REVENUE_LEGACY_HTML' if 'csv' not in label else 'MOPSOV_T21_MONTHLY_REVENUE_ARCHIVE','schema_family':v.get('schema_family'),'method':'POST' if label=='ajax_t21sc03' else 'GET','request_url':AJAX_URL if label=='ajax_t21sc03' else r['final_url'],'request_form':form(MARKETS[market],y,m) if label=='ajax_t21sc03' else None,'final_url':r['final_url'],'retrieved_at':r['retrieved_at'],'published_at':'unknown','available_at':'unknown','http_status':r['status'],'response_headers':r['headers'],'payload_bytes':len(r['body']),'payload_sha256':sha(r['body']) if r['body'] else None,'encoding_detected':v.get('encoding'),'data_rows':v.get('rows',0),'unique_company_codes':v.get('unique_codes',0),'classification':v.get('classification'),'formal_role':formal_role,'raw_semantics':'exact HTTP response body bytes','transport_ok':r['transport_ok'],'error':r.get('error')}
+            mp=md/f'{y:03d}_{m:02d}_{label}.capture.json';mp.write_text(json.dumps(meta,ensure_ascii=False,indent=2,sort_keys=True)+'\n',encoding='utf-8')
+            return {'route':label,'schema_family':v.get('schema_family'),'payload_bytes':len(r['body']),'payload_sha256':sha(r['body']) if r['body'] else None,'source_url':AJAX_URL if label=='ajax_t21sc03' else r['final_url'],'raw_path':raw_path,'metadata_path':str(mp.relative_to(OUT)),'rows':v.get('rows',0),'unique_company_codes':v.get('unique_codes',0)}
+
+          priming=prime(); observations=[]; valid={}; waf=[]
+          for market,code in MARKETS.items():
+            for y,m in months(SCAN_START,FORMAL_END):
+              r=request(AJAX_URL,'POST',form(code,y,m)); v=validate_html(r['body']) if r['transport_ok'] and r['status']==200 else {'valid':False,'classification':'HTTP_NO_DATA' if r['status'] in (400,404,410) else ('WAF_OR_FORBIDDEN' if r['status']==403 else 'TRANSPORT_ERROR'),'encoding':None,'rows':0,'unique_codes':0,'schema_family':None,'blocked':r['status']==403}
+              rec={'market':market,'roc_year':y,'month':m,'route':'ajax_t21sc03','http_status':r['status'],'transport_ok':r['transport_ok'],'bytes':len(r['body']),'sha256':sha(r['body']) if r['body'] else None,'retrieved_at':r['retrieved_at'],**v}; observations.append(rec)
+              if v.get('blocked'): waf.append(rec)
+              if v.get('valid'):
+                mem=save_capture(market,y,m,'ajax_t21sc03',r,v,'PRE_MODERN_NON_OVERLAP');valid[(market,y,m)]=[mem]
+              else:
+                # Official static archive fallback, all known filename families.
+                for suffix,label in [('', 'static_unsuffixed'),('_0','static_0'),('_1','static_1')]:
+                  u=STATIC.format(code=code,y=y,m=m,suffix=suffix); sr=request(u,'GET',None,2); sv=validate_html(sr['body']) if sr['transport_ok'] and sr['status']==200 else {'valid':False,'classification':'HTTP_NO_DATA' if sr['status'] in (404,410) else 'TRANSPORT_ERROR','encoding':None,'rows':0,'unique_codes':0,'schema_family':None,'blocked':False}
+                  srec={'market':market,'roc_year':y,'month':m,'route':label,'http_status':sr['status'],'transport_ok':sr['transport_ok'],'bytes':len(sr['body']),'sha256':sha(sr['body']) if sr['body'] else None,'retrieved_at':sr['retrieved_at'],**sv};observations.append(srec)
+                  if sv.get('valid'):
+                    mem=save_capture(market,y,m,label,sr,sv,'PRE_MODERN_NON_OVERLAP');valid.setdefault((market,y,m),[]).append(mem)
+                # no need to retain non-data bodies for every fallback route in formal RAW; their hashes remain in qualification observations.
+              time.sleep(.18)
+
+          coverage={}; ledger=[]; open_issues=[]; boundary={}
+          for market in MARKETS:
+            vals=sorted((y,m) for mk,y,m in valid if mk==market)
+            if not vals:
+              coverage[market]={'first_valid':None,'last_valid':None,'valid_months':0,'missing_within_boundary':[]};open_issues.append({'market':market,'issue':'NO_VALID_PRE2013_FULL_MARKET_SOURCE'});continue
+            first=vals[0]; expected=list(months(first,FORMAL_END)); missing=[(y,m) for y,m in expected if (market,y,m) not in valid]
+            coverage[market]={'first_valid':f'{first[0]:03d}-{first[1]:02d}','last_valid':'101-12','valid_months':sum(1 for y,m in expected if (market,y,m) in valid),'missing_within_boundary':[f'{y:03d}-{m:02d}' for y,m in missing]}
+            earlier=[o for o in observations if o['market']==market and (o['roc_year'],o['month'])<first]
+            boundary[market]={'scan_start':'085-01','first_valid':coverage[market]['first_valid'],'pre_boundary_months':len(list(months(SCAN_START,(first[0],first[1]-1)))) if first[1]>1 else None,'pre_boundary_valid_observations':sum(1 for o in earlier if o.get('valid')),'classification_counts':dict(collections.Counter(o['classification'] for o in earlier))}
+            if missing: open_issues.append({'market':market,'issue':'MISSING_WITHIN_DISCOVERED_BOUNDARY','months':coverage[market]['missing_within_boundary']})
+            for y,m in expected:
+              if (market,y,m) in valid: ledger.append({'work_unit_id':f'P2A-LEGACY-{market}-{y:03d}-{m:02d}','market':market,'roc_year':y,'month':m,'status':'RAW_CAPTURED_PENDING_CLOUD_VERIFY','formal_coverage_role':'PRE_MODERN_NON_OVERLAP','raw_members':valid[(market,y,m)]})
+
+          # Required schema transition / overlap evidence, never double-counted as formal WUs.
+          transition=[]
+          for market,code in MARKETS.items():
+            for y,m in [(90,5),(90,6),(90,8),(98,12),(99,1),(101,12),(102,1),(102,2),(115,8),(115,9)]:
+              candidates=[]
+              ar=request(AJAX_URL,'POST',form(code,y,m),2); av=validate_html(ar['body']) if ar['transport_ok'] and ar['status']==200 else {'valid':False,'classification':'HTTP_OR_TRANSPORT','encoding':None,'rows':0,'unique_codes':0,'schema_family':None}; candidates.append(('ajax_t21sc03',ar,av))
+              for suffix,label in [('', 'static_unsuffixed'),('_0','static_0'),('_1','static_1')]:
+                sr=request(STATIC.format(code=code,y=y,m=m,suffix=suffix),'GET',None,2);sv=validate_html(sr['body']) if sr['transport_ok'] and sr['status']==200 else {'valid':False,'classification':'HTTP_OR_TRANSPORT','encoding':None,'rows':0,'unique_codes':0,'schema_family':None};candidates.append((label,sr,sv))
+              cr=request(CSV.format(code=code,y=y,m=m),'GET',None,2);cv=validate_csv(cr['body']) if cr['transport_ok'] and cr['status']==200 else {'valid':False,'classification':'HTTP_OR_TRANSPORT','encoding':None,'rows':0,'unique_codes':0,'schema_family':'MOPS_T21_CSV'};candidates.append(('csv',cr,cv))
+              for label,r,v in candidates:
+                rec={'market':market,'roc_year':y,'month':m,'route':label,'http_status':r['status'],'bytes':len(r['body']),'sha256':sha(r['body']) if r['body'] else None,'retrieved_at':r['retrieved_at'],**v};transition.append(rec)
+                if r['body']:
+                  p=EVID/f'{market}_{y:03d}_{m:02d}_{label}.response.bin';p.write_bytes(r['body'])
+              time.sleep(.08)
+
+          # Repeatability: independent second dynamic request for each market first valid month; semantic equality required, byte equality recorded.
+          repeat=[]
+          for market,code in MARKETS.items():
+            fv=coverage.get(market,{}).get('first_valid')
+            if not fv:continue
+            y,m=map(int,fv.split('-')); a=request(AJAX_URL,'POST',form(code,y,m),2);time.sleep(.4);b=request(AJAX_URL,'POST',form(code,y,m),2);va=validate_html(a['body']);vb=validate_html(b['body'])
+            rr={'market':market,'month':fv,'route':'ajax_t21sc03','status_a':a['status'],'status_b':b['status'],'sha256_a':sha(a['body']) if a['body'] else None,'sha256_b':sha(b['body']) if b['body'] else None,'byte_identical':a['body']==b['body'] and bool(a['body']),'semantic_repeatable':va.get('valid') and vb.get('valid') and va.get('unique_codes')==vb.get('unique_codes') and va.get('rows')==vb.get('rows'),'rows_a':va.get('rows'),'rows_b':vb.get('rows'),'codes_a':va.get('unique_codes'),'codes_b':vb.get('unique_codes')};repeat.append(rr)
+            if not rr['semantic_repeatable']:open_issues.append({'market':market,'issue':'DYNAMIC_REPEATABILITY_FAIL','details':rr})
+
+          # WAF is only a formal blocker when it prevented a month from having any qualified fallback.
+          status='PASS' if not open_issues else 'FAIL_OPEN_ISSUES'
+          source_contract={'schema':'p2a_source_contract_v3','version':'P2-A-SOURCE-CONTRACT-v3','dataset':'MONTHLY_REVENUE','status':'FROZEN' if status=='PASS' else 'NOT_FROZEN','official_dynamic_endpoint':AJAX_URL,'dynamic_method':'POST','dynamic_request_contract':{'encodeURIComponent':'1','step':'1','firstin':'1','off':'1','TYPEK':'{sii|otc}','year':'{ROC_YEAR}','month':'{MONTH}'},'market_mapping':MARKETS,'official_static_patterns':[STATIC.format(code='{sii|otc}',y='{ROC_YEAR}',m='{MONTH}',suffix=s) for s in ('','_0','_1')],'modern_csv_pattern':CSV.format(code='{sii|otc}',y='{ROC_YEAR}',m='{MONTH}'),'legacy_schema_families':['MOPS_T21_LEGACY_HTML_V10','MOPS_T21_LEGACY_HTML_11COL'],'modern_schema_family':'MOPS_T21_CSV','dataset_historical_boundaries':coverage,'modern_csv_boundary':'102-01 / 2013-01','latest_complete_month':'115-08 / 2026-08','available_at':'unknown','published_at':'unknown','work_unit':'market x month; exact official response bytes are immutable RAW','overlap_policy':'legacy/modern overlaps are qualification only and not double-counted','modern_segment_immutable':{'work_units':328,'drive_id':'1DhEmyWLvQCS3bA9zZri1QECyPpiKxuxB','sha256':'2087d70f2011552a7a6d12a931bdd3dd6df5fa62f9dbdf77bf5c1ed0509d4112'}}
+          qual={'schema':'p2a_source_qualification_v3','status':status,'priming':priming,'coverage':coverage,'boundary_evidence':boundary,'repeatability':repeat,'transition_overlap':transition,'scan_observations':observations,'open_issues':open_issues,'notes':['TWSE and TPEx independently scanned from ROC85-01.','Dynamic ajax_t21sc03 full-market POST is primary legacy family; official static archive variants are fallback/transition evidence.','available_at and published_at remain unknown.','Existing ROC102-01..115-08 modern WUs are not recaptured.']}
+          manifest={'schema':'p2a_legacy_manifest_v3','dataset':'MONTHLY_REVENUE','claimant_id':CLAIMANT,'generated_at':dt.datetime.now(dt.timezone.utc).isoformat().replace('+00:00','Z'),'new_formal_wus':len(ledger),'coverage':coverage,'work_units':ledger,'modern_immutable':source_contract['modern_segment_immutable']}
+          anomaly={'schema':'p2a_legacy_anomaly_ledger_v3','classified_scan_observations':[{'market':o['market'],'roc_year':o['roc_year'],'month':o['month'],'route':o['route'],'http_status':o['http_status'],'classification':o['classification'],'bytes':o['bytes'],'sha256':o['sha256']} for o in observations if not o.get('valid')],'waf_observations':waf,'open_unclassified_true_gaps':open_issues}
+          controls={'P2A_SOURCE_CONTRACT_V3.json':source_contract,'P2A_SOURCE_QUALIFICATION_V3.json':qual,'P2A_LEGACY_WORK_UNIT_LEDGER_V3.json':{'schema':'p2a_legacy_wu_ledger_v3','work_units':ledger},'P2A_LEGACY_MANIFEST_V3.json':manifest,'P2A_LEGACY_COVERAGE_V3.json':{'schema':'p2a_legacy_coverage_v3','status':status,'coverage':coverage,'boundary_evidence':boundary,'modern_csv_boundary':'102-01','latest_complete_month':'115-08'},'P2A_LEGACY_ANOMALY_LEDGER_V3.json':anomaly}
+          for n,o in controls.items():(CTRL/n).write_text(json.dumps(o,ensure_ascii=False,indent=2,sort_keys=True)+'\n',encoding='utf-8')
+
+          package=OUT/'P2A_MONTHLY_REVENUE_FORMAL_RAW_LEGACY_EXTENSION_V2_20260912.zip'
+          members=sorted(p for root in (RAW,META,CTRL,EVID) for p in root.rglob('*') if p.is_file())
+          with zipfile.ZipFile(package,'w',compression=zipfile.ZIP_DEFLATED,compresslevel=9) as z:
+            for p in members:z.write(p,p.relative_to(OUT).as_posix())
+          psha=sha(package.read_bytes()); info={'schema':'p2a_legacy_package_info_v3','run_id':os.environ.get('GITHUB_RUN_ID'),'run_attempt':os.environ.get('GITHUB_RUN_ATTEMPT'),'qualification_status':status,'file_name':package.name,'bytes':package.stat().st_size,'sha256':psha,'member_count':len(members),'new_formal_wus':len(ledger),'coverage':coverage,'open_unclassified_true_gaps':len(open_issues),'modern_immutable':source_contract['modern_segment_immutable'],'formal_status':'PENDING_DRIVE_UPLOAD_AND_RAW_READBACK'}
+          (OUT/'P2A_LEGACY_PACKAGE_INFO_V3.json').write_text(json.dumps(info,ensure_ascii=False,indent=2,sort_keys=True)+'\n',encoding='utf-8');(OUT/'SHA256SUMS_LEGACY_V3.txt').write_text(f'{psha}  {package.name}\n',encoding='utf-8')
+          pathlib.Path('p2a-results/p2a_legacy_dynamic_formal_latest.json').write_text(json.dumps(info,ensure_ascii=False,indent=2,sort_keys=True)+'\n',encoding='utf-8')
+          print(json.dumps(info,ensure_ascii=False))
+          if status!='PASS':raise SystemExit('LEGACY_QUALIFICATION_OPEN_ISSUES')
+          PY
+      - name: Upload formal legacy artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: P2A_FORMAL_LEGACY_DYNAMIC_V2_20260912
+          path: legacy_v2/
+          if-no-files-found: error
+          retention-days: 7
+      - name: Publish compact result pointer
+        if: always()
+        shell: bash
+        run: |
+          if [ -f p2a-results/p2a_legacy_dynamic_formal_latest.json ]; then
+            git config user.name 'p2a-automation'
+            git config user.email 'actions@users.noreply.github.com'
+            git add p2a-results/p2a_legacy_dynamic_formal_latest.json
+            git commit -m 'P2-A formal legacy dynamic result ${{ github.run_id }}' || true
+            git push origin HEAD:p2a-transport-20260912
+          fi
