@@ -1,3 +1,4 @@
+# rerun 2026-09-12 after cancelling overlapping repair chains
 name: P4-A final exact global audit once v3
 on:
   push:
@@ -21,18 +22,9 @@ jobs:
           import json,re,collections
           pc={81:{'L':1},82:{'L':17},83:{'L':23},84:{'L':28},85:{'L':51,'O':4},86:{'L':83,'O':10},87:{'L':120,'O':20},88:{'L':179,'O':34},89:{'L':225,'O':44},90:{'L':262,'O':72},91:{'L':365,'O':78},92:{'L':308,'O':77},93:{'L':298,'O':102},94:{'L':262,'O':109},95:{'L':214,'O':106},96:{'L':234,'O':118},97:{'L':258,'O':133},98:{'L':247,'O':127},99:{'L':271,'O':143},100:{'L':302,'O':153},101:{'L':275,'O':145},102:{'L':294,'O':160},103:{'L':296,'O':164},104:{'L':308,'O':175},105:{'L':305,'O':178},106:{'L':314,'O':175},107:{'L':328,'O':185},108:{'L':337,'O':191},109:{'L':358,'O':220},110:{'L':410,'O':249},111:{'L':381,'O':234},112:{'L':372,'O':236},113:{'L':425,'O':267},114:{'L':459,'O':287},115:{'L':371,'O':233}}
           cov={(y,k):set() for y,ks in pc.items() for k in ks}; hits=collections.Counter(); accepted=[]; unexpected=[]
-          # Canonical legacy exceptions proven separately in Drive.
           for p in range(4): cov[(85,'O')].add(p); hits[(85,'O',p)]+=1
           for p in range(16): cov[(115,'L')].add(p); hits[(115,'L',p)]+=1
-          pats=[re.compile(x) for x in [
-            r'^p4a-material-info-ROC(\d+)-([LO])-P0*(\d+)-0*(\d+)-v4$',
-            r'^p4a-repair-ROC(\d+)-([LO])-P(\d+)-(\d+)-v4$',
-            r'^p4a-auto-repair-ROC(\d+)-([LO])-P(\d+)-(\d+)$',
-            r'^p4a-microrepair-ROC(\d+)-([LO])-P(\d+)-(\d+)$',
-            r'^p4a-auto-microrepair-ROC(\d+)-([LO])-P(\d+)-(\d+)$',
-            r'^p4a-final-ROC(\d+)-([LO])-P(\d+)$',
-            r'^p4a-targeted-final-ROC(\d+)-([LO])-P(\d+)$',
-            r'^p4a-gap-ROC(\d+)-([LO])-P(\d+)-(\d+)$']]
+          pats=[re.compile(x) for x in [r'^p4a-material-info-ROC(\d+)-([LO])-P0*(\d+)-0*(\d+)-v4$',r'^p4a-repair-ROC(\d+)-([LO])-P(\d+)-(\d+)-v4$',r'^p4a-auto-repair-ROC(\d+)-([LO])-P(\d+)-(\d+)$',r'^p4a-microrepair-ROC(\d+)-([LO])-P(\d+)-(\d+)$',r'^p4a-auto-microrepair-ROC(\d+)-([LO])-P(\d+)-(\d+)$',r'^p4a-final-ROC(\d+)-([LO])-P(\d+)$',r'^p4a-targeted-final-ROC(\d+)-([LO])-P(\d+)$',r'^p4a-gap-ROC(\d+)-([LO])-P(\d+)-(\d+)$']]
           pages=[]
           for obj in json.load(open('artifacts-pages.json')): pages += obj.get('artifacts',[])
           for a in pages:
