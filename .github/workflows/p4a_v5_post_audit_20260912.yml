@@ -1,7 +1,7 @@
 name: P4-A V5 post audit 20260912
 on:
   workflow_run:
-    workflows: ["P4-A exact missing V5 20260912"]
+    workflows: ["P4-A exact missing V5 20260912", "P4-A exact missing V5 accelerated 20260912"]
     types: [completed]
 permissions:
   actions: read
@@ -28,7 +28,7 @@ jobs:
           assert len(required)==8425
           objs=json.load(open('artifacts-pages.json')); arts=[]
           for o in objs: arts.extend(o.get('artifacts',[]))
-          pat=re.compile(r'^p4a-v5-gap-ROC(\d+)-([LO])-P(\d+)-(\d+)$')
+          pat=re.compile(r'^p4a-v5a?-gap-ROC(\d+)-([LO])-P(\d+)-(\d+)$')
           covered=set(); accepted=[]; unexpected=[]
           for a in arts:
             if a.get('expired'): continue
@@ -44,8 +44,7 @@ jobs:
             accepted.append({'artifact_id':a['id'],'name':a['name'],'size_in_bytes':a['size_in_bytes'],'digest':a.get('digest'),'page_count':e-s+1})
           missing=sorted(required-covered)
           def ranges(keys):
-            out=[]
-            by={}
+            out=[]; by={}
             for y,k,p in keys: by.setdefault((y,k),[]).append(p)
             for (y,k),ps in sorted(by.items()):
               ps=sorted(ps); s=pr=ps[0]
@@ -55,9 +54,8 @@ jobs:
               out.append({'roc':y,'kind':k,'start':s,'end':pr,'page_count':pr-s+1})
             return out
           result={
-            'schema':'p4a_v5_repair_result_audit_v1',
-            'lane_code':'P4-A','dataset':'MATERIAL_INFO','source_run_id':int(os.environ['SOURCE_RUN']),
-            'formal_baseline_covered_pages':4985,'repair_required_pages':8425,
+            'schema':'p4a_v5_repair_result_audit_v1','lane_code':'P4-A','dataset':'MATERIAL_INFO',
+            'source_run_id':int(os.environ['SOURCE_RUN']),'formal_baseline_covered_pages':4985,'repair_required_pages':8425,
             'accepted_success_artifact_count':len(accepted),'candidate_repair_covered_pages':len(covered),
             'candidate_total_covered_pages':4985+len(covered),'residual_missing_pages':len(missing),
             'unexpected_out_of_plan_artifact_count':len(unexpected),'accepted_artifacts':accepted,
