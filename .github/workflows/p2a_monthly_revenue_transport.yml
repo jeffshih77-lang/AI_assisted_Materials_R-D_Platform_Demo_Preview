@@ -1,0 +1,157 @@
+name: P2A formal MOPS monthly revenue transport
+
+on:
+  push:
+    branches:
+      - p2a-transport-20260912
+    paths:
+      - .github/workflows/p2a_monthly_revenue_transport.yml
+
+permissions:
+  contents: read
+
+jobs:
+  capture:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Capture formal monthly revenue RAW
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import datetime as dt, hashlib, json, pathlib, time, urllib.request, urllib.error, zipfile
+
+          OUT=pathlib.Path('out'); RAW=OUT/'raw'; META=OUT/'metadata'; CTRL=OUT/'control'
+          for p in (RAW,META,CTRL): p.mkdir(parents=True,exist_ok=True)
+          BASE='https://mopsov.twse.com.tw/nas/t21/{code}/t21sc03_{roc}_{month}.csv'
+          MARKETS={'TWSE':'sii','TPEX':'otc'}
+          START=(85,1); END=(115,8)
+          UA='Mozilla/5.0 (compatible; P2AMonthlyRevenueRawCollector/2.0)'
+
+          def sha(b): return hashlib.sha256(b).hexdigest()
+          def months(a,b):
+            y,m=a
+            while (y,m)<=b:
+              yield y,m
+              m+=1
+              if m==13: y+=1; m=1
+          def decode(b):
+            for enc in ('utf-8-sig','utf-8','cp950','big5'):
+              try: return b.decode(enc),enc
+              except UnicodeDecodeError: pass
+            return b.decode('utf-8','replace'),'utf-8-replace'
+          def classify(body,status):
+            text,enc=decode(body); head=text[:12000].lower(); stripped=text.lstrip('\ufeff\r\n\t ')
+            valid=status==200 and len(body)>500 and ('公司代號' in text or '公司名稱' in text) and ('營收' in text or '營業收入' in text)
+            if valid:
+              schema='MOPS_T21_LEGACY_HTML' if stripped.startswith('<') or '<html' in head or '<table' in head else 'MOPS_T21_CSV'
+              return True,schema,enc,'DATA'
+            if status in (404,410): kind='NO_DATA_HTTP'
+            elif status==200 and not body: kind='EMPTY'
+            elif status==200: kind='NO_DATA_OR_TEMPLATE'
+            else: kind='HTTP_ERROR'
+            return False,'UNCLASSIFIED',enc,kind
+          def fetch(url,tries=4):
+            last=None
+            for i in range(tries):
+              at=dt.datetime.now(dt.timezone.utc).isoformat().replace('+00:00','Z')
+              try:
+                req=urllib.request.Request(url,headers={'User-Agent':UA,'Accept':'*/*'})
+                with urllib.request.urlopen(req,timeout=75) as r:
+                  body=r.read()
+                  return {'ok':True,'status':getattr(r,'status',200),'body':body,'headers':dict(r.headers.items()),'final_url':r.geturl(),'retrieved_at':at}
+              except urllib.error.HTTPError as e:
+                body=e.read() if hasattr(e,'read') else b''
+                headers=dict(e.headers.items()) if e.headers else {}
+                if e.code in (404,410):
+                  return {'ok':True,'status':e.code,'body':body,'headers':headers,'final_url':url,'retrieved_at':at}
+                last=f'HTTPError {e.code}'
+              except Exception as e:
+                last=repr(e)
+              if i<tries-1: time.sleep(min(8,2**i))
+            return {'ok':False,'status':None,'body':b'','headers':{},'final_url':url,'retrieved_at':at,'error':last}
+
+          samples=[(89,12),(90,5),(90,6),(90,7),(100,6),(102,1),(110,6),(114,6),(115,8),(115,9)]
+          qualification=[]; repeatability=[]
+          for market,code in MARKETS.items():
+            for roc,month in samples:
+              url=BASE.format(code=code,roc=roc,month=month); r=fetch(url)
+              if r['ok']: valid,schema,enc,kind=classify(r['body'],r['status'])
+              else: valid,schema,enc,kind=False,'UNCLASSIFIED',None,'TRANSPORT_ERROR'
+              qualification.append({'market':market,'roc_year':roc,'month':month,'url':url,'transport_ok':r['ok'],'http_status':r['status'],'bytes':len(r['body']),'sha256':sha(r['body']) if r['body'] else None,'valid':valid,'schema_family':schema,'encoding':enc,'classification':kind,'retrieved_at':r['retrieved_at'],'error':r.get('error')})
+              time.sleep(.05)
+            url=BASE.format(code=code,roc=115,month=8); a=fetch(url); time.sleep(.3); b=fetch(url)
+            repeatability.append({'market':market,'url':url,'first_status':a['status'],'second_status':b['status'],'first_sha256':sha(a['body']) if a['body'] else None,'second_sha256':sha(b['body']) if b['body'] else None,'identical':bool(a['body']) and a['body']==b['body']})
+
+          for market in MARKETS:
+            q=[x for x in qualification if x['market']==market and x['roc_year']==115 and x['month']==8][0]
+            rp=[x for x in repeatability if x['market']==market][0]
+            if not q['valid'] or not rp['identical']:
+              raise SystemExit('QUALIFICATION_FAIL '+market+' '+json.dumps({'sample':q,'repeatability':rp},ensure_ascii=False))
+
+          captures=[]; anomalies=[]
+          for market,code in MARKETS.items():
+            for roc,month in months(START,END):
+              url=BASE.format(code=code,roc=roc,month=month); r=fetch(url)
+              if not r['ok']:
+                anomalies.append({'market':market,'roc_year':roc,'month':month,'url':url,'classification':'TRANSPORT_ERROR','error':r.get('error')}); continue
+              valid,schema,enc,kind=classify(r['body'],r['status'])
+              item={'market':market,'roc_year':roc,'month':month,'url':url,'http_status':r['status'],'bytes':len(r['body']),'sha256':sha(r['body']) if r['body'] else None,'retrieved_at':r['retrieved_at'],'schema_family':schema,'encoding':enc,'classification':kind}
+              if not valid:
+                anomalies.append(item); continue
+              rd=RAW/market; md=META/market; rd.mkdir(parents=True,exist_ok=True); md.mkdir(parents=True,exist_ok=True)
+              rp=rd/f'{roc:03d}_{month:02d}.response.bin'; mp=md/f'{roc:03d}_{month:02d}.capture.json'
+              rp.write_bytes(r['body'])
+              meta={'schema':'p2a_exact_http_capture_v1','dataset':'MONTHLY_REVENUE','work_unit_id':f'P2A-{market}-{roc:03d}-{month:02d}','market':market,'source_family':'MOPSOV_T21_MONTHLY_REVENUE_ARCHIVE','schema_family':schema,'method':'GET','request_url':url,'final_url':r['final_url'],'retrieved_at':r['retrieved_at'],'published_at':'unknown','available_at':'unknown','http_status':r['status'],'response_headers':r['headers'],'payload_bytes':len(r['body']),'payload_sha256':sha(r['body']),'encoding_detected':enc,'raw_semantics':'exact HTTP response body bytes','classification':'FORMAL_RAW_CANDIDATE_PENDING_DRIVE_READBACK'}
+              mp.write_text(json.dumps(meta,ensure_ascii=False,indent=2,sort_keys=True)+'\n',encoding='utf-8')
+              item.update({'raw_path':str(rp.relative_to(OUT)),'metadata_path':str(mp.relative_to(OUT))}); captures.append(item)
+              time.sleep(.05)
+
+          coverage={}; ledger=[]; schema_ranges={}
+          for market in MARKETS:
+            vals=sorted((x['roc_year'],x['month']) for x in captures if x['market']==market)
+            if not vals: raise SystemExit('NO_VALID_DATA '+market)
+            first,last=vals[0],vals[-1]; expected=list(months(first,END)); missing=[p for p in expected if p not in set(vals)]
+            coverage[market]={'first_valid':f'{first[0]:03d}-{first[1]:02d}','last_valid':f'{last[0]:03d}-{last[1]:02d}','valid_months':len(vals),'missing_within_boundary':[f'{y:03d}-{m:02d}' for y,m in missing]}
+            if last!=END or missing: raise SystemExit('COVERAGE_GAP '+market+' '+json.dumps(coverage[market]))
+            by={(x['roc_year'],x['month']):x for x in captures if x['market']==market}
+            for y,m in expected:
+              x=by[(y,m)]
+              ledger.append({'work_unit_id':f'P2A-{market}-{y:03d}-{m:02d}','market':market,'roc_year':y,'month':m,'status':'RAW_CAPTURED_PENDING_CLOUD_VERIFY','payload_bytes':x['bytes'],'payload_sha256':x['sha256'],'source_url':x['url'],'schema_family':x['schema_family'],'raw_path':x['raw_path'],'metadata_path':x['metadata_path']})
+            groups={}
+            for x in captures:
+              if x['market']==market: groups.setdefault(x['schema_family'],[]).append((x['roc_year'],x['month']))
+            schema_ranges[market]={k:{'first':f'{min(v)[0]:03d}-{min(v)[1]:02d}','last':f'{max(v)[0]:03d}-{max(v)[1]:02d}','months':len(v)} for k,v in groups.items()}
+
+          contract={'schema':'p2a_source_contract_v1','version':'P2-A-SOURCE-CONTRACT-v1','dataset':'MONTHLY_REVENUE','status':'FROZEN','source_family':'MOPSOV_T21_MONTHLY_REVENUE_ARCHIVE','official_host':'mopsov.twse.com.tw','request_pattern':'https://mopsov.twse.com.tw/nas/t21/{sii|otc}/t21sc03_{ROC_YEAR}_{MONTH}.csv','market_mapping':MARKETS,'work_unit':'market x month','raw_preservation':'exact HTTP response body bytes + request/response metadata','validation':'HTTP 200 + nontrivial body + company identity field + revenue field; invalid/empty/template classified as no-data/anomaly','encoding':'detected per payload; RAW never transcoded','latest_complete_month_qualified':'ROC115-08 / 2026-08','historical_source_boundary':coverage,'schema_ranges':schema_ranges,'immutable_raw':True}
+          qdoc={'schema':'p2a_source_qualification_v1','status':'PASS','samples':qualification,'repeatability':repeatability,'contract_version':'P2-A-SOURCE-CONTRACT-v1'}
+          manifest={'schema':'p2a_manifest_v1','dataset':'MONTHLY_REVENUE','claimant_id':'P2-A-CHAT-20260912-1733','source_contract_version':'P2-A-SOURCE-CONTRACT-v1','generated_at':dt.datetime.now(dt.timezone.utc).isoformat().replace('+00:00','Z'),'coverage':coverage,'schema_ranges':schema_ranges,'work_units':len(ledger),'payload_bytes':sum(x['payload_bytes'] for x in ledger),'members':ledger}
+          controls={
+            'P2A_SOURCE_CONTRACT.json':contract,
+            'P2A_SOURCE_QUALIFICATION.json':qdoc,
+            'P2A_WORK_UNIT_LEDGER.json':{'schema':'p2a_work_unit_ledger_v1','work_units':ledger},
+            'P2A_COVERAGE.json':{'schema':'p2a_coverage_v1','dataset':'MONTHLY_REVENUE','coverage':coverage,'latest_complete_gregorian':'2026-08','status':'HISTORICAL_BASE_CAPTURED_WITH_SOURCE_BOUNDARY_PENDING_CLOUD_VERIFY'},
+            'P2A_ANOMALY_LEDGER.json':{'schema':'p2a_anomaly_ledger_v1','scan_range':{'start':'085-01','end':'115-08'},'source_boundaries':coverage,'pre_boundary_or_invalid_requests':anomalies,'unclassified_true_gaps':[]},
+            'P2A_MANIFEST.json':manifest
+          }
+          for name,obj in controls.items(): (CTRL/name).write_text(json.dumps(obj,ensure_ascii=False,indent=2,sort_keys=True)+'\n',encoding='utf-8')
+
+          package=OUT/'P2A_MONTHLY_REVENUE_FORMAL_RAW_20260912.zip'
+          files=sorted(p for root in (RAW,META,CTRL) for p in root.rglob('*') if p.is_file())
+          with zipfile.ZipFile(package,'w',compression=zipfile.ZIP_DEFLATED,compresslevel=9) as z:
+            for p in files: z.write(p,p.relative_to(OUT).as_posix())
+          psha=sha(package.read_bytes())
+          info={'schema':'p2a_package_info_v1','file_name':package.name,'bytes':package.stat().st_size,'sha256':psha,'member_count':len(files),'raw_payload_files':len(captures),'work_units':len(ledger),'formal_status':'PENDING_DRIVE_UPLOAD_AND_READBACK'}
+          (OUT/'P2A_PACKAGE_INFO.json').write_text(json.dumps(info,ensure_ascii=False,indent=2,sort_keys=True)+'\n',encoding='utf-8')
+          (OUT/'SHA256SUMS.txt').write_text(f'{psha}  {package.name}\n',encoding='utf-8')
+          print(json.dumps({'qualification':'PASS','coverage':coverage,'schema_ranges':schema_ranges,'work_units':len(ledger),'raw_payload_files':len(captures),'payload_bytes':manifest['payload_bytes'],'package_sha256':psha},ensure_ascii=False))
+          PY
+
+      - name: Upload formal RAW artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: P2A_MONTHLY_REVENUE_FORMAL_RAW_20260912
+          path: out/
+          if-no-files-found: error
+          retention-days: 7
