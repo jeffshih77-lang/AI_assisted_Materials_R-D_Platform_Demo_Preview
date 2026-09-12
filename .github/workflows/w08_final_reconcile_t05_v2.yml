@@ -30,3 +30,4 @@ jobs:
           if-no-files-found: error
           retention-days: 7
           compression-level: 0
+# retry: cross-host artifact auth fix applied in final_reconcile_v2
