@@ -1,0 +1,27 @@
+name: W08 T59 firstin click semantics probe v3
+on:
+  push:
+    branches: [w08-final-free-source-20260912]
+    paths:
+      - '.github/workflows/w08_t59_firstin_click_semantics_probe_v3.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: w08-final-free-source-20260912
+      - name: Probe actual t59 click semantics
+        run: python3 w08_public_runner/w08_t59_firstin_click_semantics_probe_v3.py
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: w08-t59-firstin-click-probe-v3
+          path: w08_t59_firstin_click_probe_v3_out/
+          if-no-files-found: error
+          retention-days: 7
