@@ -1,0 +1,40 @@
+name: W08 T146 JSON API window probe v7d
+on:
+  push:
+    branches: [w08-final-free-source-20260912]
+    paths: ['.github/workflows/w08_t146_jsonapi_window_probe_v7d.yml']
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Qualify bounded date windows around known hidden market data
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import urllib.request,json,pathlib,hashlib,datetime,time
+          O=pathlib.Path('out_v7d');O.mkdir(); U='https://mops.twse.com.tw/mops/api/t146sb10'
+          def go(name,a,b):
+            body={'scopeType':'2','companyId':'','dateType':'1','firstDate':a,'lastDate':b,'marketKind':'sii','announcementBasis':'0','dateRangeType':'','announcementType':'1','sort':'1'}
+            qb=json.dumps(body,separators=(',',':')).encode(); (O/f'{name}.request.json').write_bytes(qb)
+            req=urllib.request.Request(U,data=qb,method='POST',headers={'User-Agent':'Mozilla/5.0 W08T146Window/7d','Content-Type':'application/json','Accept':'application/json,*/*','Origin':'https://mops.twse.com.tw','Referer':'https://mops.twse.com.tw/mops/#/web/t146sb10'})
+            with urllib.request.urlopen(req,timeout=60) as r: raw=r.read(); st=r.status
+            (O/f'{name}.response.bin').write_bytes(raw); p=json.loads(raw)
+            rows=sum(len(x.get('data') or []) for x in (p.get('result') or []) if isinstance(x,dict))
+            x={'case':name,'firstDate':a,'lastDate':b,'http_status':st,'api_code':p.get('code'),'rows':rows,'bytes':len(raw),'request_sha256':hashlib.sha256(qb).hexdigest(),'response_sha256':hashlib.sha256(raw).hexdigest()}; print(json.dumps(x,ensure_ascii=False),flush=True); return x
+          cases=[('31d','1000101','1000131'),('21d','1000105','1000125'),('14d','1000112','1000125'),('10d','1000116','1000125'),('8d','1000117','1000124'),('7d','1000117','1000123'),('5d','1000119','1000123'),('1d','1000121','1000121')]
+          out=[]
+          for x in cases: out.append(go(*x)); time.sleep(.3)
+          (O/'VERDICT.json').write_text(json.dumps(out,ensure_ascii=False,indent=2)+'\n')
+          good=[x for x in out if x['api_code']==200 and x['rows']>0]
+          if not any(x['case']=='7d' for x in good): raise SystemExit('7d window not qualified')
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: W08_T146_JSONAPI_WINDOW_V7D_20260912
+          path: out_v7d/
+          retention-days: 7
+          compression-level: 0
