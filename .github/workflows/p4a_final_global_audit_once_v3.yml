@@ -1,4 +1,5 @@
 # rerun 2026-09-12 after cancelling overlapping repair chains
+# rerun 2026-09-12 16:03 Asia/Taipei reconcile late artifacts before further source repair
 name: P4-A final exact global audit once v3
 on:
   push:
