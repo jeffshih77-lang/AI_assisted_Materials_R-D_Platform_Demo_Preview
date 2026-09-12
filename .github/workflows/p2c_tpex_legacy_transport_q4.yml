@@ -1,0 +1,78 @@
+name: P2-C TPEx legacy transport qualification q4
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/p2c_tpex_legacy_transport_q4.yml
+
+permissions:
+  contents: read
+
+jobs:
+  qualify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch and inspect official legacy query/result pages
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT=out_p2c_tpex_legacy_q4
+          mkdir -p "$OUT"
+          BASE='https://hist.tpex.org.tw/Hist/STOCK/AFTERTRADING/PERATIO_ANALYSIS/'
+          for P in RSTA3103QRY.HTML RSTA3103RES.HTML; do
+            curl -sS -L --connect-timeout 20 --max-time 60 -A 'Mozilla/5.0 P2-C-Qualification/4.0' -D "$OUT/$P.headers.txt" -o "$OUT/$P.strict.bin" "$BASE$P" 2>"$OUT/$P.strict.stderr.txt" || true
+            if [ ! -s "$OUT/$P.strict.bin" ]; then
+              curl -k -sS -L --connect-timeout 20 --max-time 60 -A 'Mozilla/5.0 P2-C-Qualification/4.0' -D "$OUT/$P.headers.txt" -o "$OUT/$P.bin" "$BASE$P" 2>"$OUT/$P.insecure.stderr.txt" || true
+            else
+              cp "$OUT/$P.strict.bin" "$OUT/$P.bin"
+            fi
+          done
+          python3 - <<'PY'
+          import pathlib,re,json,urllib.parse,hashlib
+          out=pathlib.Path('out_p2c_tpex_legacy_q4')
+          base='https://hist.tpex.org.tw/Hist/STOCK/AFTERTRADING/PERATIO_ANALYSIS/'
+          allmeta={}
+          for name in ['RSTA3103QRY.HTML','RSTA3103RES.HTML']:
+            b=(out/f'{name}.bin').read_bytes() if (out/f'{name}.bin').exists() else b''
+            best=None
+            for enc in ['big5','cp950','utf-8']:
+              t=b.decode(enc,errors='replace')
+              bad=t.count('�')
+              if best is None or bad<best[0]: best=(bad,enc,t)
+            _,enc,t=best
+            forms=[]
+            for fm in re.finditer(r'<form\b([^>]*)>(.*?)</form>',t,re.I|re.S):
+              attrs=fm.group(1); body=fm.group(2)
+              def attr(a,k):
+                m=re.search(rf'{k}\s*=\s*["\']?([^"\'\s>]+)',a,re.I)
+                return m.group(1) if m else None
+              inputs=[]
+              for im in re.finditer(r'<input\b([^>]*)>',body,re.I):
+                a=im.group(1); inputs.append({'name':attr(a,'name'),'value':attr(a,'value'),'type':attr(a,'type')})
+              selects=[]
+              for sm in re.finditer(r'<select\b([^>]*)>(.*?)</select>',body,re.I|re.S):
+                a=sm.group(1); opts=[]
+                for om in re.finditer(r'<option\b([^>]*)>(.*?)</option>',sm.group(2),re.I|re.S):
+                  val=attr(om.group(1),'value'); txt=re.sub(r'<.*?>','',om.group(2)).strip(); opts.append({'value':val,'text':txt})
+                selects.append({'name':attr(a,'name'),'options':opts})
+              action=attr(attrs,'action') or ''
+              forms.append({'action':urllib.parse.urljoin(base+name,action),'method':(attr(attrs,'method') or 'GET').upper(),'inputs':inputs,'selects':selects})
+            textareas=[]
+            for m in re.finditer(r'(?:action|url|href|src)\s*=\s*["\']([^"\']+)',t,re.I):
+              u=urllib.parse.urljoin(base+name,m.group(1));
+              if u not in textareas: textareas.append(u)
+            allmeta[name]={'bytes':len(b),'sha256':hashlib.sha256(b).hexdigest(),'encoding':enc,'forms':forms,'url_candidates':textareas,'text_excerpt':re.sub(r'\s+',' ',t)[:8000]}
+          (out/'STRUCTURE.json').write_text(json.dumps(allmeta,ensure_ascii=False,indent=2)+'\n')
+          print(json.dumps(allmeta,ensure_ascii=False,indent=2))
+          PY
+          find "$OUT" -type f -print0 | sort -z | xargs -0 sha256sum > "$OUT/SHA256SUMS.txt"
+      - name: Upload evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: p2c-tpex-legacy-transport-q4
+          path: out_p2c_tpex_legacy_q4/
+          retention-days: 7
+          if-no-files-found: error
