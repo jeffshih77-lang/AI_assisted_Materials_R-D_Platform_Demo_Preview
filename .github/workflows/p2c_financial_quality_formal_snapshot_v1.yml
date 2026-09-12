@@ -1,0 +1,58 @@
+name: P2-C financial quality formal snapshot v1
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/p2c_financial_quality_formal_snapshot_v1.yml
+
+permissions:
+  contents: read
+
+jobs:
+  capture:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Capture official MOPS financial-quality source bytes
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import urllib.request,urllib.error,pathlib,hashlib,json,datetime,csv,io,sys,time
+          out=pathlib.Path('out_p2c_finqual_snapshot_v1'); raw=out/'raw'; raw.mkdir(parents=True)
+          eps=[('t187ap14_L','https://mopsfin.twse.com.tw/opendata/t187ap14_L.csv'),('t187ap14_O','https://mopsfin.twse.com.tw/opendata/t187ap14_O.csv'),('t187ap17_L','https://mopsfin.twse.com.tw/opendata/t187ap17_L.csv'),('t187ap17_O','https://mopsfin.twse.com.tw/opendata/t187ap17_O.csv')]
+          manifest=[]; anomalies=[]
+          for name,url in eps:
+            copies=[]
+            for rep in (1,2):
+              req=urllib.request.Request(url,headers={'User-Agent':'Mozilla/5.0 P2-C-FormalRAW/1.0','Accept':'*/*','Accept-Encoding':'identity','Connection':'close'})
+              status=None; final=url; body=b''; err=None; headers={}
+              try:
+                with urllib.request.urlopen(req,timeout=45) as r: status=r.status; final=r.geturl(); headers=dict(r.headers.items()); body=r.read()
+              except urllib.error.HTTPError as e: status=e.code; final=e.geturl(); headers=dict(e.headers.items()) if e.headers else {}; body=e.read(); err=f'HTTPError:{e.code}'
+              except Exception as e: err=f'{type(e).__name__}:{e}'
+              sha=hashlib.sha256(body).hexdigest(); p=raw/f'{name}.rep{rep}.csv'; p.write_bytes(body)
+              text=body.decode('utf-8-sig',errors='replace'); rows=list(csv.reader(io.StringIO(text))) if body else []
+              columns=rows[0] if rows else []; data_rows=max(0,len(rows)-1); first=rows[1] if len(rows)>1 else None
+              m={'source':name,'request_url':url,'final_url':final,'repeat':rep,'status':status,'bytes':len(body),'sha256':sha,'fetched_at_utc':datetime.datetime.now(datetime.timezone.utc).isoformat(),'error':err,'content_type':headers.get('Content-Type'),'columns':columns,'data_rows':data_rows,'first_row':first,'published_at':'UNKNOWN','available_at':'UNKNOWN','note':'out-table date is source field; do not infer exact publication timestamp'}
+              copies.append(m); manifest.append(m)
+              if status!=200 or err or not columns or data_rows<=0: anomalies.append(m)
+              time.sleep(0.3)
+            if copies[0]['sha256']!=copies[1]['sha256'] or copies[0]['bytes']!=copies[1]['bytes']:
+              anomalies.append({'source':name,'type':'REPEAT_HASH_MISMATCH','rep1_sha':copies[0]['sha256'],'rep2_sha':copies[1]['sha256'],'rep1_bytes':copies[0]['bytes'],'rep2_bytes':copies[1]['bytes']})
+          (out/'MANIFEST.json').write_text(json.dumps(manifest,ensure_ascii=False,sort_keys=True,indent=2)+'\n'); (out/'ANOMALIES.json').write_text(json.dumps(anomalies,ensure_ascii=False,sort_keys=True,indent=2)+'\n')
+          summary={'sources':4,'captures':len(manifest),'repeat_hash_all_equal':all(manifest[i]['sha256']==manifest[i+1]['sha256'] for i in range(0,len(manifest),2)),'anomaly_count':len(anomalies),'formal_role':'official published financial statement/ratio source evidence only; no P2-C derived scores/features'}
+          (out/'SUMMARY.json').write_text(json.dumps(summary,ensure_ascii=False,sort_keys=True,indent=2)+'\n'); (out/'SHA256SUMS.txt').write_text(''.join(f'{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.relative_to(out)}\n' for p in sorted(raw.glob('*'))))
+          print(json.dumps(summary,ensure_ascii=False,indent=2))
+          if anomalies: sys.exit(2)
+          PY
+      - name: Upload formal snapshot
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: p2c-financial-quality-formal-snapshot-v1
+          path: out_p2c_finqual_snapshot_v1/
+          if-no-files-found: error
+          retention-days: 7
