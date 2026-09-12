@@ -14,7 +14,7 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       REPO: ${{ github.repository }}
       RUN5: '34691917746'
-      PRIOR_HARVEST_ARTIFACTS: '10298335358'
+      PRIOR_HARVEST_ARTIFACTS: '10298335358 10297435964'
     steps:
       - uses: actions/checkout@v4
       - name: Harvest only new successful 5p artifacts
