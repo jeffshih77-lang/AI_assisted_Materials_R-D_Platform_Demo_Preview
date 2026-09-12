@@ -1,0 +1,29 @@
+name: W08 T146 final aggregate v1
+on:
+  push:
+    branches: [w08-final-free-source-20260912]
+    paths: ['.github/workflows/w08_t146_final_aggregate_v1.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  aggregate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: w08-final-free-source-20260912
+      - name: Verify all 11 T146 formal segments and build deterministic reference aggregate
+        run: python3 w08_public_runner/w08_t146_final_aggregate_v1.py
+      - name: Upload T146 final reference aggregate
+        uses: actions/upload-artifact@v4
+        with:
+          name: W08_T146_FINAL_REFERENCE_AGGREGATE_20260912
+          path: out_w08_t146_final/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
