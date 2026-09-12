@@ -1,0 +1,92 @@
+name: P2-C legacy TPEx and MOPSfin qualification v3
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/p2c_legacy_mopsfin_qualification_v3.yml
+
+permissions:
+  contents: read
+
+jobs:
+  qualify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Capture legacy TPEx page and MOPSfin POST samples
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT=out_p2c_legacy_mopsfin_q3
+          mkdir -p "$OUT/tpex_legacy" "$OUT/mopsfin"
+          # Legacy TPEx official page; preserve strict TLS result and use -k fallback only if required.
+          U='https://hist.tpex.org.tw/Hist/STOCK/AFTERTRADING/PERATIO_ANALYSIS/param_3103.HTML'
+          curl -sS -L --connect-timeout 20 --max-time 60 -A 'Mozilla/5.0 P2-C-Qualification/3.0' -D "$OUT/tpex_legacy/page.headers.txt" -o "$OUT/tpex_legacy/page.strict.html" "$U" 2>"$OUT/tpex_legacy/page.strict.stderr.txt" || true
+          if [ ! -s "$OUT/tpex_legacy/page.strict.html" ]; then
+            curl -k -sS -L --connect-timeout 20 --max-time 60 -A 'Mozilla/5.0 P2-C-Qualification/3.0' -D "$OUT/tpex_legacy/page.headers.txt" -o "$OUT/tpex_legacy/page.html" "$U" 2>"$OUT/tpex_legacy/page.insecure.stderr.txt" || true
+          else
+            cp "$OUT/tpex_legacy/page.strict.html" "$OUT/tpex_legacy/page.html"
+          fi
+          python3 - <<'PY'
+          import pathlib,re,json,urllib.parse,hashlib
+          root=pathlib.Path('out_p2c_legacy_mopsfin_q3/tpex_legacy'); p=root/'page.html'; b=p.read_bytes() if p.exists() else b''; t=b.decode('big5',errors='replace')
+          if '�' in t[:5000]: t=b.decode('utf-8',errors='replace')
+          forms=[]
+          for fm in re.finditer(r'<form\b([^>]*)>(.*?)</form>',t,re.I|re.S):
+            attrs=fm.group(1); body=fm.group(2)
+            act=re.search(r'action=["\']([^"\']+)',attrs,re.I); meth=re.search(r'method=["\']([^"\']+)',attrs,re.I)
+            inputs=[]
+            for im in re.finditer(r'<input\b([^>]*)>',body,re.I):
+              a=im.group(1); n=re.search(r'name=["\']?([^"\'\s>]+)',a,re.I); v=re.search(r'value=["\']?([^"\'>\s]*)',a,re.I); typ=re.search(r'type=["\']?([^"\'\s>]+)',a,re.I)
+              if n: inputs.append({'name':n.group(1),'value':v.group(1) if v else None,'type':typ.group(1) if typ else None})
+            selects=[]
+            for sm in re.finditer(r'<select\b([^>]*)>(.*?)</select>',body,re.I|re.S):
+              a=sm.group(1); n=re.search(r'name=["\']?([^"\'\s>]+)',a,re.I); opts=[]
+              for om in re.finditer(r'<option\b([^>]*)>(.*?)</option>',sm.group(2),re.I|re.S):
+                oa=om.group(1); ov=re.search(r'value=["\']?([^"\'>\s]*)',oa,re.I); opts.append({'value':ov.group(1) if ov else re.sub('<.*?>','',om.group(2)).strip(),'text':re.sub('<.*?>','',om.group(2)).strip()})
+              selects.append({'name':n.group(1) if n else None,'options':opts})
+            forms.append({'action':urllib.parse.urljoin('https://hist.tpex.org.tw/Hist/STOCK/AFTERTRADING/PERATIO_ANALYSIS/param_3103.HTML',act.group(1) if act else ''),'method':meth.group(1).upper() if meth else 'GET','inputs':inputs,'selects':selects})
+          scripts=[]
+          for m in re.finditer(r'<script[^>]+src=["\']([^"\']+)',t,re.I): scripts.append(urllib.parse.urljoin('https://hist.tpex.org.tw/Hist/STOCK/AFTERTRADING/PERATIO_ANALYSIS/param_3103.HTML',m.group(1)))
+          hrefs=[]
+          for m in re.finditer(r'href=["\']([^"\']+)',t,re.I): hrefs.append(urllib.parse.urljoin('https://hist.tpex.org.tw/Hist/STOCK/AFTERTRADING/PERATIO_ANALYSIS/param_3103.HTML',m.group(1)))
+          meta={'bytes':len(b),'sha256':hashlib.sha256(b).hexdigest(),'forms':forms,'scripts':scripts,'hrefs':hrefs[:500]}
+          (root/'PAGE_STRUCTURE.json').write_text(json.dumps(meta,ensure_ascii=False,indent=2)+'\n')
+          print('TPEx legacy structure',json.dumps(meta,ensure_ascii=False,indent=2))
+          PY
+
+          # MOPSfin official compare/data POST qualification. Exact response bodies are saved.
+          MF='https://mopsfin.twse.com.tw'
+          curl -sS -L -c "$OUT/mopsfin/cookies.txt" -b "$OUT/mopsfin/cookies.txt" -A 'Mozilla/5.0 P2-C-Qualification/3.0' -D "$OUT/mopsfin/home.headers.txt" -o "$OUT/mopsfin/home.html" "$MF/"
+          python3 - <<'PY'
+          import subprocess,pathlib,json,hashlib,datetime
+          out=pathlib.Path('out_p2c_legacy_mopsfin_q3/mopsfin')
+          samples=[
+            ('2013Q1_DebtRatio','compareItem=DebtRatio&quarter=true&ylabel=%25&ys=20131&revenue=false&bcodeAvg=true&companyAvg=true&qnumber=&companyId=2330'),
+            ('2013Q4_GrossMargin','compareItem=GrossMargin&quarter=true&ylabel=%25&ys=20134&revenue=false&bcodeAvg=true&companyAvg=true&qnumber=&companyId=2330'),
+            ('2025Q4_ROE','compareItem=ROE&quarter=true&ylabel=%25&ys=20254&revenue=false&bcodeAvg=true&companyAvg=true&qnumber=&companyId=2330'),
+            ('2026Q2_CurrentRatio','compareItem=CurrentRatio&quarter=true&ylabel=%25&ys=20262&revenue=false&bcodeAvg=true&companyAvg=true&qnumber=&companyId=2330'),
+          ]
+          metas=[]
+          for name,payload in samples:
+            body=out/f'{name}.body.bin'; hdr=out/f'{name}.headers.txt'; err=out/f'{name}.stderr.txt'
+            cmd=['curl','-sS','-L','--connect-timeout','20','--max-time','60','-A','Mozilla/5.0 P2-C-Qualification/3.0','-b',str(out/'cookies.txt'),'-c',str(out/'cookies.txt'),'-H','Content-Type: application/x-www-form-urlencoded; charset=UTF-8','-H','X-Requested-With: XMLHttpRequest','-D',str(hdr),'-o',str(body),'-w','%{http_code}','--data',payload,'https://mopsfin.twse.com.tw/compare/data']
+            r=subprocess.run(cmd,capture_output=True,text=True); err.write_text(r.stderr); b=body.read_bytes() if body.exists() else b''
+            txt=b.decode('utf-8',errors='replace'); parsed=None
+            try: parsed=json.loads(txt)
+            except: pass
+            m={'sample':name,'payload':payload,'http_code':int(r.stdout) if r.stdout.isdigit() else None,'curl_rc':r.returncode,'bytes':len(b),'sha256':hashlib.sha256(b).hexdigest(),'fetched_at_utc':datetime.datetime.now(datetime.timezone.utc).isoformat(),'json':isinstance(parsed,(dict,list)),'top_keys':list(parsed.keys()) if isinstance(parsed,dict) else None,'message':parsed.get('message') if isinstance(parsed,dict) else None,'showNameList':parsed.get('showNameList') if isinstance(parsed,dict) else None,'xaxisList':parsed.get('xaxisList') if isinstance(parsed,dict) else None}
+            metas.append(m); print('MOPSfin sample',json.dumps(m,ensure_ascii=False))
+          (out/'POST_QUALIFICATION.json').write_text(json.dumps(metas,ensure_ascii=False,indent=2)+'\n')
+          PY
+          find "$OUT" -type f -print0 | sort -z | xargs -0 sha256sum > "$OUT/SHA256SUMS.txt"
+      - name: Upload qualification evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: p2c-legacy-mopsfin-qualification-v3
+          path: out_p2c_legacy_mopsfin_q3/
+          if-no-files-found: error
+          retention-days: 7
