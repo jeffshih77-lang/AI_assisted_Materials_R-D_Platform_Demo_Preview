@@ -1,0 +1,55 @@
+name: P2A early MOPS unsuffixed HTML probe
+
+on:
+  push:
+    branches: [p2a-transport-20260912]
+    paths: [.github/workflows/p2a_unsuffixed_html_probe.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Probe early unsuffixed archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          python3 - <<'PY'
+          import urllib.request, urllib.error, hashlib, json, datetime as dt, time
+          markets={'TWSE':'sii','TPEX':'otc'}
+          samples=[(89,12),(90,4),(90,5),(90,6),(90,7),(90,12),(91,1),(91,6),(91,12),(92,1),(95,1),(99,12),(100,1),(101,12),(102,1)]
+          def dec(b):
+            for e in ('big5','cp950','utf-8-sig','utf-8'):
+              try:return b.decode(e),e
+              except UnicodeDecodeError:pass
+            return b.decode('utf-8','replace'),'utf-8-replace'
+          rows=[]
+          for market,code in markets.items():
+            for y,m in samples:
+              u=f'https://mopsov.twse.com.tw/nas/t21/{code}/t21sc03_{y}_{m}.html'
+              try:
+                q=urllib.request.Request(u,headers={'User-Agent':'Mozilla/5.0 (compatible; P2A/1.0)','Referer':'https://mopsov.twse.com.tw/','Accept':'text/html,*/*'})
+                with urllib.request.urlopen(q,timeout=45) as r:b=r.read();st=getattr(r,'status',200)
+                t,e=dec(b); low=t.lower()
+                valid=st==200 and len(b)>500 and ('營收' in t or '營業收入' in t) and ('公司代號' in t or '公司名稱' in t or '公司' in t) and ('<table' in low or '<html' in low)
+                rows.append({'market':market,'roc_year':y,'month':m,'url':u,'status':st,'bytes':len(b),'sha256':hashlib.sha256(b).hexdigest() if b else None,'encoding':e,'valid':valid,'head':t[:160].replace('\n',' ')})
+              except Exception as e:
+                rows.append({'market':market,'roc_year':y,'month':m,'url':u,'valid':False,'error':repr(e)})
+              time.sleep(.05)
+          doc={'generated_at':dt.datetime.now(dt.timezone.utc).isoformat(),'rows':rows}
+          for market in markets:
+            v=[x for x in rows if x['market']==market and x.get('valid')]
+            doc[market]={'first_valid_sample':min((x['roc_year'],x['month']) for x in v) if v else None,'last_valid_sample':max((x['roc_year'],x['month']) for x in v) if v else None}
+          open('out/P2A_UNSUFFIXED_HTML_PROBE.json','w',encoding='utf-8').write(json.dumps(doc,ensure_ascii=False,indent=2)+'\n')
+          print(json.dumps(doc,ensure_ascii=False))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: P2A_UNSUFFIXED_HTML_PROBE
+          path: out/
+          if-no-files-found: error
+          retention-days: 7
