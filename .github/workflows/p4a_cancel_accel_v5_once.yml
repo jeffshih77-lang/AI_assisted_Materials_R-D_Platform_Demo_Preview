@@ -1,0 +1,19 @@
+name: P4-A cancel accelerated V5 once
+on:
+  push:
+    paths:
+      - '.github/workflows/p4a_cancel_accel_v5_once.yml'
+permissions:
+  actions: write
+  contents: read
+jobs:
+  cancel:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+    steps:
+      - run: |
+          set -euo pipefail
+          gh api -X POST "repos/$REPO/actions/runs/34685276466/cancel"
+          echo cancelled 34685276466
