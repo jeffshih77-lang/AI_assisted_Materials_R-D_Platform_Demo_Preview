@@ -1,0 +1,146 @@
+name: P4-A V5 final aggregate after retry 20260912
+on:
+  workflow_run:
+    workflows: ["P4-A V5 auto residual retry after HT 20260912"]
+    types: [completed]
+permissions:
+  actions: read
+  contents: read
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      artifact_count: ${{ steps.plan.outputs.artifact_count }}
+      covered_pages: ${{ steps.plan.outputs.covered_pages }}
+      missing_pages: ${{ steps.plan.outputs.missing_pages }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      ACCEL_RUN: '34685276466'
+      HT_RUN: '34685616731'
+      RETRY_RUN: ${{ github.event.workflow_run.id }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: plan
+        run: |
+          set -euo pipefail
+          for R in "$ACCEL_RUN" "$HT_RUN" "$RETRY_RUN"; do gh api "repos/$REPO/actions/runs/$R/artifacts?per_page=100" --paginate --slurp > "arts-$R.json"; done
+          python - <<'PY'
+          import json,re,os,pathlib
+          p=json.load(open('p4a_runner/P4A_EXACT_MISSING_PLAN_V5_20260912.json'))
+          req={(int(r['roc']),r['kind'],x) for r in p['runs'] for x in range(int(r['start']),int(r['end'])+1)}; assert len(req)==8425
+          pats=[re.compile(r'^p4a-v5a-gap-ROC(\d+)-([LO])-P(\d+)-(\d+)$'),re.compile(r'^p4a-v5r-gap-ROC(\d+)-([LO])-P(\d+)-(\d+)$'),re.compile(r'^p4a-v5rr-gap-ROC(\d+)-([LO])-P(\d+)-(\d+)$')]
+          rows=[]; covered=set(); dups=[]; unexpected=[]
+          for R in (os.environ['ACCEL_RUN'],os.environ['HT_RUN'],os.environ['RETRY_RUN']):
+            arts=[]
+            for page in json.load(open(f'arts-{R}.json')): arts+=page.get('artifacts',[])
+            for a in arts:
+              if a.get('expired'): continue
+              m=next((q.match(a.get('name','')) for q in pats if q.match(a.get('name',''))),None)
+              if not m: continue
+              y=int(m.group(1)); k=m.group(2); s=int(m.group(3)); e=int(m.group(4)); pages={(y,k,x) for x in range(s,e+1)}
+              bad=pages-req
+              if bad: unexpected.append({'run':int(R),'id':int(a['id']),'name':a['name'],'bad_count':len(bad)}); continue
+              ov=covered&pages
+              if ov: dups.append({'run':int(R),'id':int(a['id']),'name':a['name'],'duplicate_count':len(ov)})
+              covered|=pages
+              rows.append({'run':int(R),'id':int(a['id']),'name':a['name'],'size':int(a['size_in_bytes']),'digest':a.get('digest'),'roc':y,'kind':k,'start':s,'end':e,'page_count':e-s+1})
+          miss=sorted(req-covered)
+          def ranges(keys):
+            out=[]; by={}
+            for y,k,x in keys: by.setdefault((y,k),[]).append(x)
+            for (y,k),xs in sorted(by.items()):
+              xs=sorted(xs); s=pr=xs[0]
+              for x in xs[1:]:
+                if x==pr+1: pr=x
+                else: out.append({'roc':y,'kind':k,'start':s,'end':pr,'page_count':pr-s+1}); s=pr=x
+              out.append({'roc':y,'kind':k,'start':s,'end':pr,'page_count':pr-s+1})
+            return out
+          audit={'schema':'p4a_v5_final_aggregate_candidate_audit_v1','lane_code':'P4-A','required_pages':13410,'formal_baseline_covered_pages':4985,'repair_required_pages':8425,'candidate_repair_covered_pages':len(covered),'candidate_total_covered_pages':4985+len(covered),'residual_missing_pages':len(miss),'unexpected_out_of_plan_artifact_count':len(unexpected),'duplicate_evidence_artifact_count':len(dups),'source_runs':[int(os.environ['ACCEL_RUN']),int(os.environ['HT_RUN']),int(os.environ['RETRY_RUN'])],'accepted_artifact_count':len(rows),'residual_missing_ranges':ranges(miss) if miss else [],'unexpected':unexpected,'duplicates':dups,'formal_credit_note':'candidate only until Drive raw-byte size/SHA readback MATCH'}
+          pathlib.Path('P4A_V5_FINAL_AGGREGATE_CANDIDATE_AUDIT.json').write_text(json.dumps(audit,ensure_ascii=False,indent=2,sort_keys=True)+'\n')
+          rows.sort(key=lambda r:(r['roc'],r['kind'],r['start'],r['end'],r['run'],r['id']))
+          limit=85_000_000; batches=[]; cur=[]; sz=0
+          for r in rows:
+            if cur and sz+r['size']>limit: batches.append(cur);cur=[];sz=0
+            cur.append(r);sz+=r['size']
+          if cur:batches.append(cur)
+          inc=[{'batch':f'{i+1:03d}','ids':','.join(str(x['id']) for x in b)} for i,b in enumerate(batches)]
+          assert len(inc)<=256
+          with open(os.environ['GITHUB_OUTPUT'],'a') as f:
+            f.write('matrix='+json.dumps({'include':inc},separators=(',',':'))+'\n');f.write('artifact_count='+str(len(rows))+'\n');f.write('covered_pages='+str(len(covered))+'\n');f.write('missing_pages='+str(len(miss))+'\n')
+          print(json.dumps({'accepted_artifacts':len(rows),'candidate_repair_pages':len(covered),'candidate_total':4985+len(covered),'missing':len(miss),'unexpected':len(unexpected),'duplicates':len(dups),'batches':len(batches)},indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: p4a-v5-final-aggregate-candidate-audit
+          path: P4A_V5_FINAL_AGGREGATE_CANDIDATE_AUDIT.json
+          if-no-files-found: error
+          retention-days: 3
+  harvest:
+    needs: plan
+    if: ${{ needs.plan.outputs.artifact_count != '0' }}
+    strategy:
+      fail-fast: false
+      max-parallel: 6
+      matrix: ${{ fromJson(needs.plan.outputs.matrix) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      IDS_CSV: ${{ matrix.ids }}
+      BATCH: ${{ matrix.batch }}
+    steps:
+      - name: Download immutable artifacts
+        run: |
+          set -euo pipefail; mkdir -p incoming stage
+          IFS=',' read -ra IDS <<< "$IDS_CSV"
+          for id in "${IDS[@]}"; do
+            gh api "repos/$REPO/actions/artifacts/$id" > "incoming/$id.meta.json"
+            curl --fail --silent --show-error --location -H "Authorization: Bearer $GH_TOKEN" -H "X-GitHub-Api-Version: 2022-11-28" "https://api.github.com/repos/$REPO/actions/artifacts/$id/zip" -o "incoming/$id.outer.zip"
+          done
+      - name: Validate V4 and stage immutable children
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os,json,re,zipfile,io,hashlib,pathlib
+          inc=pathlib.Path('incoming');st=pathlib.Path('stage');ids=[int(x) for x in os.environ['IDS_CSV'].split(',') if x]
+          pats=[re.compile(r'^p4a-v5a-gap-ROC(\d+)-([LO])-P(\d+)-(\d+)$'),re.compile(r'^p4a-v5r-gap-ROC(\d+)-([LO])-P(\d+)-(\d+)$'),re.compile(r'^p4a-v5rr-gap-ROC(\d+)-([LO])-P(\d+)-(\d+)$')]; entries=[]
+          for aid in ids:
+            meta=json.load(open(inc/f'{aid}.meta.json'));outer=(inc/f'{aid}.outer.zip').read_bytes();exp=meta.get('digest','').split(':',1)[-1];assert exp and hashlib.sha256(outer).hexdigest()==exp
+            m=next((q.match(meta['name']) for q in pats if q.match(meta['name'])),None);assert m,meta['name'];y=int(m.group(1));k=m.group(2);s=int(m.group(3));e=int(m.group(4))
+            with zipfile.ZipFile(io.BytesIO(outer)) as oz:
+              cs=[n for n in oz.namelist() if n.lower().endswith('.zip') and not n.endswith('/')];assert len(cs)==1;cn=cs[0];child=oz.read(cn)
+            with zipfile.ZipFile(io.BytesIO(child)) as cz:
+              ms=[n for n in cz.namelist() if n.endswith('/MANIFEST.json') or n=='MANIFEST.json'];assert len(ms)==1;man=json.loads(cz.read(ms[0]).decode('utf-8-sig'))
+            assert man['schema']=='p4a_material_info_page_chunk_v4';c=man['coverage'];a=man['assertions'];caps=man.get('captures',[]);anos=man.get('anomalies',[]);pc=e-s+1
+            assert (int(c['roc_year']),c['kind'],int(c['start_page']),int(c['end_page']))==(y,k,s,e);assert int(a['page_count'])==pc and int(a['list_capture_count'])==pc
+            ls=[x for x in caps if x.get('stage')=='LIST'];ds=[x for x in caps if x.get('stage')=='DETAIL'];assert len(ls)==pc and int(a['detail_capture_count'])==len(ds)
+            assert a['all_http_200'] is True and a['all_payload_nonempty'] is True;assert all(x.get('http_status')==200 and int(x.get('payload_bytes',0))>0 for x in caps)
+            assert int(a['nonstandard_detail_count'])==len(anos);assert all(x.get('disposition')=='PRESERVE_RAW_DO_NOT_ZERO_FILL' for x in anos);assert sorted(int(x['page']) for x in man.get('page_summaries',[]))==list(range(s,e+1))
+            stored=f'artifact_{aid}__{pathlib.Path(cn).name}';(st/stored).write_bytes(child);entries.append({'artifact_id':aid,'artifact_name':meta['name'],'artifact_outer_digest':meta['digest'],'child_stored_name':stored,'child_sha256':hashlib.sha256(child).hexdigest(),'child_size':len(child),'coverage':{'roc_year':y,'kind':k,'start_page':s,'end_page':e,'page_count':pc}})
+          idx={'schema':'p4a_v5_final_drive_bundle_index_v1','lane_code':'P4-A','dataset':'MATERIAL_INFO','source_requests_made_by_harvest':False,'batch':os.environ['BATCH'],'artifact_count':len(entries),'entries':entries};(st/'BUNDLE_INDEX.json').write_text(json.dumps(idx,ensure_ascii=False,indent=2,sort_keys=True)+'\n')
+          PY
+      - name: Build Drive-ready parent and self verify
+        run: |
+          python - <<'PY'
+          import os,json,zipfile,pathlib,hashlib
+          st=pathlib.Path('stage');idx=json.loads((st/'BUNDLE_INDEX.json').read_text());out=pathlib.Path(f'P4A-V5-FINAL-DRIVE-BATCH{os.environ["BATCH"]}.zip')
+          with zipfile.ZipFile(out,'w',zipfile.ZIP_STORED) as z:
+            z.write(st/'BUNDLE_INDEX.json','BUNDLE_INDEX.json')
+            for e in idx['entries']:z.write(st/e['child_stored_name'],e['child_stored_name'])
+          assert out.stat().st_size<100*1024*1024
+          with zipfile.ZipFile(out) as z:
+            chk=json.loads(z.read('BUNDLE_INDEX.json'))
+            for e in chk['entries']:
+              b=z.read(e['child_stored_name']);assert len(b)==e['child_size'] and hashlib.sha256(b).hexdigest()==e['child_sha256']
+          print(out,out.stat().st_size,hashlib.sha256(out.read_bytes()).hexdigest())
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: p4a-v5-final-drive-batch${{ matrix.batch }}
+          path: P4A-V5-FINAL-DRIVE-BATCH${{ matrix.batch }}.zip
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 3
