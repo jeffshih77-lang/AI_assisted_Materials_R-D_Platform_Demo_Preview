@@ -1,4 +1,4 @@
-name: P2-D Q0.30 COCO 20140319 attachment probe
+name: P2D Q030 COCO 20140319 attachment probe
 
 on:
   push:
@@ -20,24 +20,20 @@ jobs:
           mkdir -p out
           URL='https://coco-in.net/forum.php?aid=ODIzNDR8N2JmYThmNjh8MTc4MzY2MDkwOXwwfDMzMjQ2&mod=attachment'
           set +e
-          curl -L --max-time 30 --connect-timeout 15 --silent --show-error \
-            -A 'Mozilla/5.0 P2D-Q030-PublicAttachmentProbe/1.0' \
-            -D out/headers.txt -o out/20140319.download "$URL"
+          curl -L --max-time 30 --connect-timeout 15 --silent --show-error -A 'Mozilla/5.0 P2D-Q030-PublicAttachmentProbe/1.0' -D out/headers.txt -o out/20140319.download "$URL"
           RC=$?
           set -e
           printf 'curl_rc=%s\n' "$RC" > out/summary.txt
           if [ -f out/20140319.download ]; then
-            printf 'bytes=' >> out/summary.txt; wc -c < out/20140319.download >> out/summary.txt
-            printf 'sha256=' >> out/summary.txt; sha256sum out/20140319.download | awk '{print $1}' >> out/summary.txt
-            printf 'file_type=' >> out/summary.txt; file -b out/20140319.download >> out/summary.txt
-            printf 'magic_hex=' >> out/summary.txt; xxd -p -l 16 out/20140319.download >> out/summary.txt
-            if python3 - <<'PY'
-from pathlib import Path
-b=Path('out/20140319.download').read_bytes()
-# 7z magic: 37 7A BC AF 27 1C
-raise SystemExit(0 if b.startswith(bytes.fromhex('377abcaf271c')) else 1)
-PY
-            then
+            printf 'bytes=' >> out/summary.txt
+            wc -c < out/20140319.download >> out/summary.txt
+            printf 'sha256=' >> out/summary.txt
+            sha256sum out/20140319.download | awk '{print $1}' >> out/summary.txt
+            printf 'file_type=' >> out/summary.txt
+            file -b out/20140319.download >> out/summary.txt
+            MAGIC=$(xxd -p -l 6 out/20140319.download || true)
+            printf 'magic_hex=%s\n' "$MAGIC" >> out/summary.txt
+            if [ "$MAGIC" = '377abcaf271c' ]; then
               echo 'seven_zip_magic=PASS' >> out/summary.txt
               mv out/20140319.download out/20140319.7z
               7z l out/20140319.7z > out/listing.txt || true
