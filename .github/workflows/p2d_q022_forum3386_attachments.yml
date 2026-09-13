@@ -1,0 +1,59 @@
+name: P2-D Q0.22 bounded forum3386 attachment map
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/p2d_q022_forum3386_attachments.yml
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Map disclosed attachment links on two public pages only
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          python3 - <<'PY'
+          import urllib.request,urllib.parse,re,html,json,hashlib,pathlib
+          out=pathlib.Path('out'); base='https://forum.twbts.com/'
+          urls=[base+'viewthread.php?tid=3386&page=2',base+'viewthread.php?tid=3386&page=4']
+          R={'scope':'two_public_pages_attachment_metadata_only','pages':[],'attachments_downloaded':0}
+          for idx,u in enumerate(urls,1):
+            rec={'url':u,'attachments':[]}
+            try:
+              req=urllib.request.Request(u,headers={'User-Agent':'Mozilla/5.0 P2D-Q022/1.0'})
+              with urllib.request.urlopen(req,timeout=30) as r:
+                b=r.read(); rec.update(status=getattr(r,'status',200),bytes=len(b),sha256=hashlib.sha256(b).hexdigest(),content_type=r.headers.get('Content-Type',''))
+              (out/f'forum3386_p{2 if idx==1 else 4}.html').write_bytes(b)
+              s=b.decode('big5hkscs',errors='replace'); ss=html.unescape(s); plain=re.sub(r'<[^>]+>',' ',ss); plain=re.sub(r'\s+',' ',plain)
+              for m in re.finditer(r'<a[^>]+href=["\']([^"\']+)["\'][^>]*>(.*?)</a>',ss,re.I|re.S):
+                href=html.unescape(m.group(1)); txt=re.sub('<[^>]+>',' ',m.group(2)); txt=re.sub(r'\s+',' ',html.unescape(txt)).strip()
+                if 'attachment.php' in href.lower() or re.search(r'\.(?:rar|zip|csv|xls|xlsx|mdb)(?:\?|$)',href.lower()):
+                  full=urllib.parse.urljoin(u,href); ctx=re.sub(r'<[^>]+>',' ',ss[max(0,m.start()-300):m.end()+350]); ctx=re.sub(r'\s+',' ',html.unescape(ctx)).strip()
+                  if full not in [x['url'] for x in rec['attachments']]: rec['attachments'].append({'url':full,'anchor_text':txt,'context':ctx[:1000]})
+              ctxs={}
+              for key in ['20110516','strDate','6236','6262','11576','11606','附件','測試檔','1101']:
+                arr=[]
+                for m in re.finditer(re.escape(key),plain,re.I):
+                  arr.append(plain[max(0,m.start()-450):m.end()+1000])
+                  if len(arr)>=6: break
+                if arr: ctxs[key]=arr
+              rec['contexts']=ctxs
+            except Exception as e: rec['error']=repr(e)
+            R['pages'].append(rec)
+          (out/'q022_manifest.json').write_text(json.dumps(R,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+          print(json.dumps(R,ensure_ascii=False,indent=2))
+          PY
+      - name: Upload one-day artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: p2d-q022-forum3386-map
+          path: out/
+          if-no-files-found: error
+          retention-days: 1
