@@ -1,16 +1,16 @@
 name: P2-D Q0.19 bounded forum 6750 probe
 
 on:
-  pull_request:
+  push:
     branches: [main]
-    types: [reopened]
+    paths:
+      - .github/workflows/p2d_q019_forum6750_probe.yml
 
 permissions:
   contents: read
 
 jobs:
   probe:
-    if: github.head_ref == 'p2d-q015-byte-test'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -53,7 +53,6 @@ jobs:
                       if len(arr)>=8: break
                   if arr: contexts[key]=arr
               result['contexts']=contexts
-              # Extract all page-disclosed attachment/file hrefs, but do not download any attachment.
               links=[]
               for m in re.finditer(r'<a[^>]+href=["\']([^"\']+)["\'][^>]*>(.*?)</a>',ss,re.I|re.S):
                   href=html.unescape(m.group(1)); text=re.sub('<[^>]+>',' ',m.group(2)); text=re.sub(r'\s+',' ',html.unescape(text)).strip()
@@ -63,7 +62,6 @@ jobs:
                       ctx=re.sub(r'<[^>]+>',' ',ss[max(0,m.start()-250):m.end()+250]); ctx=re.sub(r'\s+',' ',html.unescape(ctx)).strip()
                       if full not in [x['url'] for x in links]: links.append({'url':full,'anchor_text':text,'context':ctx[:800]})
               result['attachment_links']=links[:20]
-              # Count row-like sequences around broker code/price/buy/sell in visible page text.
               rowpat=re.compile(r'(?<!\d)(\d{3,4}[A-Za-z]?)\s+([^\d\s][^\d]{0,20}?)?\s*(\d{1,4}(?:\.\d+)?)\s+([\d,]+)\s+([\d,]+)')
               rows=[]
               for m in rowpat.finditer(plain):
@@ -72,7 +70,6 @@ jobs:
                   if len(rows)>=200: break
               result['row_like_count_capped']=len(rows)
               result['row_like_examples']=rows[:30]
-              # Look for ROC/Gregorian date strings exposed in visible text.
               roc=sorted(set(re.findall(r'(?<!\d)(?:9\d|10[0-9]|11[0-9])[/.-](?:0?[1-9]|1[0-2])[/.-](?:0?[1-9]|[12]\d|3[01])(?!\d)',plain)))
               greg=sorted(set(re.findall(r'(?<!\d)20(?:0\d|1\d|2\d)[/-](?:0?[1-9]|1[0-2])[/.-](?:0?[1-9]|[12]\d|3[01])(?!\d)',plain)))
               result['roc_dates']=roc[:50]; result['gregorian_dates']=greg[:50]
