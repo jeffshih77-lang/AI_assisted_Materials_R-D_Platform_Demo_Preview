@@ -1,0 +1,77 @@
+name: P2-D Q0.20 bounded forum 7309 source-thread probe
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/p2d_q020_forum7309_probe.yml
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Fetch one publicly linked source-thread page
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          python3 - <<'PY'
+          import hashlib, html, json, pathlib, re, urllib.parse, urllib.request
+          out=pathlib.Path('out')
+          u='https://forum.twbts.com/viewthread.php?tid=7309&extra=&page=2'
+          result={'scope':'single_public_linked_source_thread_page','page_url':u,'attachments_downloaded':0}
+          try:
+              req=urllib.request.Request(u,headers={'User-Agent':'Mozilla/5.0 P2D-Q020-PublicEvidence/1.0'})
+              with urllib.request.urlopen(req,timeout=30) as r:
+                  b=r.read(); result.update({'status':getattr(r,'status',200),'final_url':r.geturl(),'bytes':len(b),'sha256':hashlib.sha256(b).hexdigest(),'content_type':r.headers.get('Content-Type','')})
+              (out/'forum_7309_p2_raw.html').write_bytes(b)
+              best=None
+              for enc in ('big5hkscs','cp950','big5','utf-8'):
+                  s=b.decode(enc,errors='replace'); score=sum(x in s for x in ['證券商','成交單價','買進股數','賣出股數'])
+                  if best is None or score>best[0]: best=(score,enc,s)
+              score,enc,s=best; result['decoded_as']=enc; result['target_header_score']=score
+              ss=html.unescape(s)
+              t=re.search(r'<title[^>]*>(.*?)</title>',ss,re.I|re.S); result['title']=re.sub('<[^>]+>',' ',t.group(1)).strip() if t else None
+              plain=re.sub(r'<script.*?</script>',' ',ss,flags=re.I|re.S); plain=re.sub(r'<style.*?</style>',' ',plain,flags=re.I|re.S); plain=re.sub(r'<[^>]+>',' ',plain); plain=re.sub(r'\s+',' ',plain)
+              result['has_full_target_header']=all(x in plain for x in ['證券商','成交單價','買進股數','賣出股數'])
+              links=[]
+              for m in re.finditer(r'<a[^>]+href=["\']([^"\']+)["\'][^>]*>(.*?)</a>',ss,re.I|re.S):
+                  href=html.unescape(m.group(1)); text=re.sub('<[^>]+>',' ',m.group(2)); text=re.sub(r'\s+',' ',html.unescape(text)).strip(); low=href.lower()
+                  if 'attachment.php' in low or re.search(r'\.(?:rar|zip|csv|xls|xlsx)(?:\?|$)',low):
+                      full=urllib.parse.urljoin(u,href); ctx=re.sub(r'<[^>]+>',' ',ss[max(0,m.start()-220):m.end()+260]); ctx=re.sub(r'\s+',' ',html.unescape(ctx)).strip()
+                      if full not in [x['url'] for x in links]: links.append({'url':full,'anchor_text':text,'context':ctx[:800]})
+              result['attachment_links']=links[:30]
+              contexts={}
+              for key in ['交易日期','股票代號','證券商','成交單價','買進股數','賣出股數','下載','CSV','程式']:
+                  arr=[]
+                  for m in re.finditer(re.escape(key),plain,re.I):
+                      arr.append(plain[max(0,m.start()-400):m.end()+1000])
+                      if len(arr)>=10: break
+                  if arr: contexts[key]=arr
+              result['contexts']=contexts
+              result['dates_yyyy']=sorted(set(re.findall(r'(?<!\d)20\d{2}[/.-](?:0?[1-9]|1[0-2])[/.-](?:0?[1-9]|[12]\d|3[01])(?!\d)',plain)))[:100]
+              result['dates_roc']=sorted(set(re.findall(r'(?<!\d)(?:9\d|10[0-9]|11[0-9])[/.-](?:0?[1-9]|1[0-2])[/.-](?:0?[1-9]|[12]\d|3[01])(?!\d)',plain)))[:100]
+              # count visible row-like broker-price-buy-sell entries
+              rowpat=re.compile(r'(?<!\d)(\d{3,4}[A-Za-z]?)\s+([^\d\s][^\d]{0,20}?)?\s*(\d{1,4}(?:\.\d+)?)\s+([\d,]+)\s+([\d,]+)')
+              rows=[]
+              for m in rowpat.finditer(plain):
+                  tup=m.groups()
+                  if tup not in rows: rows.append(tup)
+                  if len(rows)>=500: break
+              result['row_like_count_capped']=len(rows); result['row_like_examples']=rows[:40]
+          except Exception as e:
+              result['error']=repr(e)
+          (out/'q020_manifest.json').write_text(json.dumps(result,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+          print(json.dumps(result,ensure_ascii=False,indent=2))
+          PY
+      - name: Upload one-day artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: p2d-q020-forum7309-probe
+          path: out/
+          if-no-files-found: error
+          retention-days: 1
