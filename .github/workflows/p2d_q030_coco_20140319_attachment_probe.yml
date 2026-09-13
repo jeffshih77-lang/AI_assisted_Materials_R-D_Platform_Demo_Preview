@@ -1,53 +1,13 @@
-name: P2D Q030 COCO 20140319 attachment probe
+name: P2D Q030 COCO 20140319 attachment probe frozen
 
 on:
-  push:
-    branches:
-      - p2d-q030-20140319-attachment-probe
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
-  probe:
+  frozen:
     runs-on: ubuntu-latest
-    timeout-minutes: 3
     steps:
-      - name: One anonymous GET to page-disclosed attachment
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p out
-          URL='https://coco-in.net/forum.php?aid=ODIzNDR8N2JmYThmNjh8MTc4MzY2MDkwOXwwfDMzMjQ2&mod=attachment'
-          set +e
-          curl -L --max-time 30 --connect-timeout 15 --silent --show-error -A 'Mozilla/5.0 P2D-Q030-PublicAttachmentProbe/1.0' -D out/headers.txt -o out/20140319.download "$URL"
-          RC=$?
-          set -e
-          printf 'curl_rc=%s\n' "$RC" > out/summary.txt
-          if [ -f out/20140319.download ]; then
-            printf 'bytes=' >> out/summary.txt
-            wc -c < out/20140319.download >> out/summary.txt
-            printf 'sha256=' >> out/summary.txt
-            sha256sum out/20140319.download | awk '{print $1}' >> out/summary.txt
-            printf 'file_type=' >> out/summary.txt
-            file -b out/20140319.download >> out/summary.txt
-            MAGIC=$(xxd -p -l 6 out/20140319.download || true)
-            printf 'magic_hex=%s\n' "$MAGIC" >> out/summary.txt
-            if [ "$MAGIC" = '377abcaf271c' ]; then
-              echo 'seven_zip_magic=PASS' >> out/summary.txt
-              mv out/20140319.download out/20140319.7z
-              7z l out/20140319.7z > out/listing.txt || true
-            else
-              echo 'seven_zip_magic=FAIL' >> out/summary.txt
-              head -c 4096 out/20140319.download > out/prefix.bin || true
-            fi
-          fi
-          cat out/summary.txt
-          cat out/headers.txt || true
-      - name: Upload probe evidence
-        uses: actions/upload-artifact@v4
-        with:
-          name: p2d-q030-coco-20140319-probe
-          path: out/
-          retention-days: 7
-          if-no-files-found: error
+      - run: echo 'Probe frozen after successful public anonymous GET in run 34748667507.'
