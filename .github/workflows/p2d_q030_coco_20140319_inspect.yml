@@ -1,0 +1,92 @@
+name: P2D Q030 inspect preserved 20140319 archive
+
+on:
+  push:
+    branches:
+      - p2d-q030-20140319-attachment-probe
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - name: Download prior preserved artifact and inspect archive
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p work out
+          curl -L --fail --silent --show-error \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            'https://api.github.com/repos/jeffshih77-lang/AI_assisted_Materials_R-D_Platform_Demo_Preview/actions/artifacts/10314638289/zip' \
+            -o work/probe.zip
+          unzip -q work/probe.zip -d work/probe
+          cp work/probe/20140319.7z out/20140319.7z
+          sha256sum out/20140319.7z > out/archive.sha256
+          7z t out/20140319.7z > out/archive_test.txt
+          mkdir -p work/ex
+          7z x -y out/20140319.7z -owork/ex >/dev/null
+          cat > work/inspect.py <<'PY'
+          from pathlib import Path
+          import hashlib, csv, json, collections
+          base=Path('work/ex/20140319')
+          out=Path('out')
+          files=sorted(base.glob('*.csv'))
+          def decode(b):
+              for enc in ('cp950','big5','utf-8-sig','utf-8'):
+                  try: return b.decode(enc),enc
+                  except UnicodeDecodeError: pass
+              return b.decode('latin1'),'latin1'
+          rows=[]
+          fingerprints=collections.Counter()
+          for p in files:
+              b=p.read_bytes(); text,enc=decode(b); lines=text.splitlines()
+              nonempty=[x.strip() for x in lines if x.strip()]
+              first=nonempty[0] if nonempty else ''
+              second=nonempty[1] if len(nonempty)>1 else ''
+              joined='\n'.join(nonempty[:8])
+              exact_header=all(k in text for k in ('券商','價格','買進股數','賣出股數'))
+              fingerprints[first[:100]] += 1
+              rows.append({
+                  'name':p.name,'bytes':len(b),'sha256':hashlib.sha256(b).hexdigest(),
+                  'encoding':enc,'line_count':len(lines),'first_line':first,'second_line':second,
+                  'exact_header_keywords':exact_header
+              })
+          with (out/'inventory.csv').open('w',encoding='utf-8',newline='') as f:
+              w=csv.DictWriter(f,fieldnames=rows[0].keys()); w.writeheader(); w.writerows(rows)
+          summary={
+              'file_count':len(files),
+              'total_uncompressed_bytes':sum(r['bytes'] for r in rows),
+              'exact_header_keyword_files':sum(1 for r in rows if r['exact_header_keywords']),
+              'encodings':dict(collections.Counter(r['encoding'] for r in rows)),
+              'first_line_fingerprints':dict(fingerprints),
+              'archive_sha256':hashlib.sha256((out/'20140319.7z').read_bytes()).hexdigest(),
+          }
+          (out/'inspection.json').write_text(json.dumps(summary,ensure_ascii=False,indent=2),encoding='utf-8')
+          for stock in ('0050','1101','2330','3293','5349'):
+              p=base/(stock+'.csv')
+              if p.exists():
+                  text,enc=decode(p.read_bytes())
+                  sample='encoding='+enc+'\n'+'\n'.join(text.splitlines()[:30])+'\n'
+                  (out/f'sample_{stock}.txt').write_text(sample,encoding='utf-8')
+          print(json.dumps(summary,ensure_ascii=False,indent=2))
+          PY
+          python3 work/inspect.py
+      - name: Upload inspection evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: p2d-q030-coco-20140319-inspection
+          path: |
+            out/archive.sha256
+            out/archive_test.txt
+            out/inspection.json
+            out/inventory.csv
+            out/sample_*.txt
+          retention-days: 7
+          if-no-files-found: error
