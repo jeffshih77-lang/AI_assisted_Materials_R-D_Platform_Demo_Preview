@@ -1,0 +1,85 @@
+name: P2-D Q0.24 bounded Wayback TWSE 2011 exact URL probe
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/p2d_q024_wayback_twse2011.yml
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Query three bounded CDX targets and fetch at most one exact archived response
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          python3 - <<'PY'
+          import urllib.request,urllib.parse,json,hashlib,pathlib
+          out=pathlib.Path('out')
+          exact='http://bsr.twse.com.tw/bshtm/bshtm_report_Messages.aspx?strDate=20110516&StartNumber=2454&FocusIndex=All_40&flg_Print=0'
+          variants=[
+            exact,
+            'http://bsr.twse.com.tw/bshtm/bshtm_report_Messages.aspx?strDate=20110516&StartNumber=2454&FocusIndex=All_40',
+            'http://bsr.twse.com.tw/bshtm/bshtm_report_Messages.aspx*'
+          ]
+          R={'scope':'three_bounded_cdx_queries_one_archived_fetch_max','target':exact,'queries':[],'archived':None}
+          candidates=[]
+          for i,target in enumerate(variants):
+            params={'url':target,'output':'json','filter':'statuscode:200','from':'2011','to':'2012','limit':'50','fl':'timestamp,original,statuscode,mimetype,digest,length'}
+            if i==2: params['collapse']='urlkey'
+            u='https://web.archive.org/cdx/search/cdx?'+urllib.parse.urlencode(params)
+            rec={'target':target,'cdx_url':u}
+            try:
+              req=urllib.request.Request(u,headers={'User-Agent':'Mozilla/5.0 P2D-Q024/1.0'})
+              with urllib.request.urlopen(req,timeout=35) as r:
+                b=r.read(); rec.update(status=getattr(r,'status',200),bytes=len(b),sha256=hashlib.sha256(b).hexdigest(),content_type=r.headers.get('Content-Type',''))
+              txt=b.decode('utf-8',errors='replace'); rec['preview']=txt[:12000]
+              try:
+                rows=json.loads(txt)
+                if rows and len(rows)>1:
+                  hdr=rows[0]
+                  for row in rows[1:]:
+                    d=dict(zip(hdr,row));
+                    if 'strDate=20110516' in d.get('original','') and 'StartNumber=2454' in d.get('original',''): candidates.append(d)
+                  rec['row_count']=len(rows)-1
+                else: rec['row_count']=0
+              except Exception as e: rec['parse_error']=repr(e)
+            except Exception as e: rec['error']=repr(e)
+            R['queries'].append(rec)
+          # one archived retrieval maximum, only if CDX explicitly returns the exact dated/stock URL.
+          if candidates:
+            c=sorted(candidates,key=lambda x:x.get('timestamp',''))[0]
+            au='https://web.archive.org/web/'+c['timestamp']+'id_/'+c['original']
+            a={'candidate':c,'archive_url':au}
+            try:
+              req=urllib.request.Request(au,headers={'User-Agent':'Mozilla/5.0 P2D-Q024/1.0'})
+              with urllib.request.urlopen(req,timeout=40) as r:
+                b=r.read(); a.update(status=getattr(r,'status',200),final_url=r.geturl(),bytes=len(b),sha256=hashlib.sha256(b).hexdigest(),content_type=r.headers.get('Content-Type',''),magic_hex=b[:32].hex())
+              (out/'archived_twse_20110516_2454.bin').write_bytes(b)
+              for enc in ('big5hkscs','cp950','big5','utf-8'):
+                try:
+                  s=b.decode(enc,errors='replace')
+                  score=sum(x in s for x in ['證券商','成交單價','買進股數','賣出股數'])
+                  a.setdefault('decode_scores',[]).append({'encoding':enc,'target_header_score':score})
+                  if score>=3:
+                    a['decoded_as']=enc; a['head_text']=s[:30000]; break
+                except Exception: pass
+            except Exception as e: a['error']=repr(e)
+            R['archived']=a
+          R['candidate_count']=len(candidates)
+          (out/'q024_manifest.json').write_text(json.dumps(R,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+          print(json.dumps(R,ensure_ascii=False,indent=2))
+          PY
+      - name: Upload one-day artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: p2d-q024-wayback-twse2011
+          path: out/
+          if-no-files-found: error
+          retention-days: 1
