@@ -1,0 +1,112 @@
+name: P2-D Q0.23 exact 2011 1101 attachment probe
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/p2d_q023_1101rar_probe.yml
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Fetch exact page-disclosed 1101.rar once and inspect with preinstalled tools only
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out/extracted
+          python3 - <<'PY'
+          import urllib.request, pathlib, json, hashlib, subprocess, shutil, os, zipfile, re
+          out=pathlib.Path('out')
+          url='https://forum.twbts.com/attachment.php?aid=NjIxMXxmNTYzYTE3Y3wxNzg5MjcyMjM3fGM5YmNwV3RGMFZlRlljU0lWNkU1WkhFUGxWQjBObkRETzBJWWdmSUIzMm10dDhV'
+          referer='https://forum.twbts.com/viewthread.php?tid=3386&page=2'
+          R={'scope':'one_exact_page_disclosed_attachment','visible_name':'1101.rar','visible_size':'116.77 KB','posted':'2011-05-16 16:31','url':url,'install_used':False}
+          try:
+            req=urllib.request.Request(url,headers={'User-Agent':'Mozilla/5.0 P2D-Q023/1.0','Referer':referer})
+            with urllib.request.urlopen(req,timeout=30) as r:
+              b=r.read(); R.update(status=getattr(r,'status',200),final_url=r.geturl(),bytes=len(b),sha256=hashlib.sha256(b).hexdigest(),content_type=r.headers.get('Content-Type',''),content_disposition=r.headers.get('Content-Disposition',''),magic_hex=b[:32].hex())
+            rar=b.startswith(b'Rar!'); R['rar_magic']=rar
+            p=out/'1101.rar'
+            if rar and R['status']==200: p.write_bytes(b)
+            else: (out/'response_prefix.bin').write_bytes(b[:4096])
+            R['available_tools']={x:shutil.which(x) for x in ['7z','7zz','unrar','bsdtar','file','strings','soffice','libreoffice','ssconvert']}
+            if rar:
+              # List/extract using existing tools only; no installation.
+              tool=None
+              if shutil.which('7z'): tool='7z'
+              elif shutil.which('7zz'): tool='7zz'
+              elif shutil.which('unrar'): tool='unrar'
+              elif shutil.which('bsdtar'): tool='bsdtar'
+              R['archive_tool']=tool
+              if tool:
+                try:
+                  if tool in ('7z','7zz'):
+                    ls=subprocess.run([tool,'l','-slt',str(p)],capture_output=True,text=True,errors='replace',timeout=30)
+                    R['archive_list_rc']=ls.returncode; R['archive_list_text']=ls.stdout[-12000:]
+                    ex=subprocess.run([tool,'x','-y',str(p),f'-o{out/"extracted"}'],capture_output=True,text=True,errors='replace',timeout=30)
+                  elif tool=='unrar':
+                    ls=subprocess.run([tool,'lb',str(p)],capture_output=True,text=True,errors='replace',timeout=30)
+                    R['archive_list_rc']=ls.returncode; R['archive_list_text']=ls.stdout[-12000:]
+                    ex=subprocess.run([tool,'x','-o+','-inul',str(p),str(out/'extracted')+'/'],capture_output=True,text=True,errors='replace',timeout=30)
+                  else:
+                    ls=subprocess.run([tool,'-tf',str(p)],capture_output=True,text=True,errors='replace',timeout=30)
+                    R['archive_list_rc']=ls.returncode; R['archive_list_text']=ls.stdout[-12000:]
+                    ex=subprocess.run([tool,'-xf',str(p),'-C',str(out/'extracted')],capture_output=True,text=True,errors='replace',timeout=30)
+                  R['extract_rc']=ex.returncode; R['extract_tail']=(ex.stdout+'\n'+ex.stderr)[-5000:]
+                except Exception as e: R['archive_error']=repr(e)
+              files=[]
+              for q in sorted((out/'extracted').rglob('*')):
+                if not q.is_file(): continue
+                data=q.read_bytes(); rec={'path':str(q.relative_to(out/'extracted')),'bytes':len(data),'sha256':hashlib.sha256(data).hexdigest(),'magic_hex':data[:16].hex()}
+                if shutil.which('file'):
+                  fr=subprocess.run(['file','-b',str(q)],capture_output=True,text=True,errors='replace'); rec['file_type']=fr.stdout.strip()
+                # bounded string fingerprints from original extracted member
+                txt=''
+                for args in (['strings','-a',str(q)],['strings','-a','-el',str(q)]):
+                  if shutil.which('strings'):
+                    try: txt += '\n'+subprocess.run(args,capture_output=True,text=True,errors='replace',timeout=20).stdout
+                    except Exception: pass
+                hits=[]
+                for key in ['證券商','成交單價','買進股數','賣出股數','交易日期','股票代號','1101','2011','100/05','100/5','台泥','36.']:
+                  if key.lower() in txt.lower(): hits.append(key)
+                rec['string_hits']=hits
+                # retain only short lines carrying likely target fingerprints
+                ctx=[]
+                for line in txt.splitlines():
+                  if any(k.lower() in line.lower() for k in ['1101','證券','成交','買進','賣出','台泥','2011','100/05','100/5']):
+                    ctx.append(line[:500])
+                    if len(ctx)>=80: break
+                rec['string_context']=ctx
+                files.append(rec)
+              R['extracted_files']=files
+              # If LibreOffice is already present, convert spreadsheet copies for read-only semantic inspection.
+              soff=shutil.which('soffice') or shutil.which('libreoffice')
+              if soff:
+                convdir=out/'converted'; convdir.mkdir(exist_ok=True)
+                for q in sorted((out/'extracted').rglob('*')):
+                  if q.is_file() and q.suffix.lower() in ('.xls','.xlsx','.ods'):
+                    cp=subprocess.run([soff,'--headless','--convert-to','csv','--outdir',str(convdir),str(q)],capture_output=True,text=True,errors='replace',timeout=60)
+                    R.setdefault('conversions',[]).append({'file':q.name,'rc':cp.returncode,'stdout':cp.stdout[-2000:],'stderr':cp.stderr[-2000:]})
+                conv=[]
+                for c in sorted(convdir.glob('*.csv')):
+                  cb=c.read_bytes(); text=None; enc=None
+                  for e in ('utf-8-sig','cp950','big5','latin1'):
+                    try: text=cb.decode(e); enc=e; break
+                    except Exception: pass
+                  conv.append({'name':c.name,'bytes':len(cb),'sha256':hashlib.sha256(cb).hexdigest(),'encoding':enc,'head':text[:12000] if text else None})
+                R['converted_csv']=conv
+          except Exception as e: R['error']=repr(e)
+          (out/'q023_manifest.json').write_text(json.dumps(R,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+          print(json.dumps(R,ensure_ascii=False,indent=2))
+          PY
+      - name: Upload one-day artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: p2d-q023-1101rar-probe
+          path: out/
+          if-no-files-found: error
+          retention-days: 1
