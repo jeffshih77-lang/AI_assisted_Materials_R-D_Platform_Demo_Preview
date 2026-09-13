@@ -1,0 +1,83 @@
+name: P2D Q024 lintaixu TPEx preservation qualification
+
+on:
+  push:
+    branches:
+      - p2d-q024-lintaixu-preserve
+    paths:
+      - .github/workflows/p2d_q024_lintaixu_tpex_preserve.yml
+
+permissions:
+  contents: read
+
+jobs:
+  qualify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Acquire immutable public Git source only
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --filter=blob:none --no-checkout https://github.com/lintaixu/auto_crawler_tw_stock.git source
+          cd source
+          git checkout 93ddc59e35f1a093daf3a53841d45f517c8a1ac5 -- output/tpex/1240_1150202.csv LICENSE
+          test "$(git hash-object output/tpex/1240_1150202.csv)" = "5492d22b3f9c571e838f45f9f0abca83c194b17d"
+          cd ..
+          mkdir -p artifact
+          cp source/output/tpex/1240_1150202.csv artifact/P2D_SOURCE_LINTAIXU_TPEX_1240_1150202.csv
+          cp source/LICENSE artifact/SOURCE_LICENSE.txt
+
+      - name: Validate exact broker x transaction-price schema and hashes
+        shell: python
+        run: |
+          import csv, hashlib, json, pathlib, re, subprocess
+          p = pathlib.Path('artifact/P2D_SOURCE_LINTAIXU_TPEX_1240_1150202.csv')
+          b = p.read_bytes()
+          sha256 = hashlib.sha256(b).hexdigest()
+          git_sha = subprocess.check_output(['git','-C','source','hash-object','output/tpex/1240_1150202.csv'], text=True).strip()
+          text = b.decode('utf-8-sig')
+          lines = text.splitlines()
+          assert lines[0].strip() == '券商買賣證券成交價量資訊'
+          stock_line = next(csv.reader([lines[1]]))
+          assert stock_line[0].strip() == '證券代碼' and stock_line[1].strip() == '1240'
+          reader = csv.DictReader(lines[2:])
+          required = ['序號','券商','價格','買進股數','賣出股數']
+          assert reader.fieldnames == required, reader.fieldnames
+          rows = list(reader)
+          assert rows and all(all(r.get(c,'').strip() != '' for c in required) for r in rows)
+          for r in rows:
+            float(r['價格']); int(r['買進股數'].replace(',','')); int(r['賣出股數'].replace(',',''))
+          m = re.fullmatch(r'1240_(\d{3})(\d{2})(\d{2})\.csv', '1240_1150202.csv')
+          assert m
+          roc_year, mm, dd = map(int, m.groups())
+          trade_date = f'{roc_year+1911:04d}-{mm:02d}-{dd:02d}'
+          manifest = {
+            'source_repo':'lintaixu/auto_crawler_tw_stock',
+            'source_commit':'93ddc59e35f1a093daf3a53841d45f517c8a1ac5',
+            'source_path':'output/tpex/1240_1150202.csv',
+            'source_git_blob_sha1':git_sha,
+            'bytes':len(b),
+            'sha256':sha256,
+            'encoding':'utf-8-sig-compatible',
+            'market':'TPEX',
+            'trade_date':trade_date,
+            'stock_id':'1240',
+            'rows':len(rows),
+            'schema':required,
+            'required_nulls':0,
+            'broker_count':len({r['券商'].split()[0] for r in rows}),
+            'price_count':len({r['價格'] for r in rows}),
+            'buy_shares_sum':sum(int(r['買進股數'].replace(',','')) for r in rows),
+            'sell_shares_sum':sum(int(r['賣出股數'].replace(',','')) for r in rows),
+            'qualification':'EXACT_BROKER_BRANCH_TRANSACTION_PRICE_CANDIDATE__BYTE_IDENTITY_PASS'
+          }
+          pathlib.Path('artifact/qualification_manifest.json').write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding='utf-8')
+          print(json.dumps(manifest, ensure_ascii=False))
+
+      - name: Upload qualification artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: p2d-q024-lintaixu-tpex-1240-1150202
+          path: artifact/
+          if-no-files-found: error
+          retention-days: 7
