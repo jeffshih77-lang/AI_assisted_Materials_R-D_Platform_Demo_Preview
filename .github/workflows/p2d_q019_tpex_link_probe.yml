@@ -1,0 +1,38 @@
+name: P2-D Q0.19 TPEx public link-only probe
+on:
+  pull_request:
+    branches: [main]
+    types: [reopened]
+permissions:
+  contents: read
+jobs:
+  probe:
+    if: github.head_ref == 'p2d-q015-byte-test'
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Resolve only two public legacy-document hrefs
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import html, json, re, ssl, urllib.parse, urllib.request
+          u='https://dsp.tpex.org.tw/web/system/mainboard.php'
+          ctx=ssl._create_unverified_context()
+          req=urllib.request.Request(u,headers={'User-Agent':'Mozilla/5.0 P2D-Q019-LinkOnly/1.0'})
+          with urllib.request.urlopen(req,timeout=30,context=ctx) as r:
+              b=r.read(); status=getattr(r,'status',200)
+          s=b.decode('big5',errors='replace')
+          hits=[]
+          for m in re.finditer(r'<a[^>]+href=["\']([^"\']+)["\'][^>]*>(.*?)</a>',s,re.I|re.S):
+              href=html.unescape(m.group(1)); text=re.sub('<[^>]+>',' ',m.group(2)); text=re.sub(r'\s+',' ',html.unescape(text)).strip()
+              nearby=re.sub('<[^>]+>',' ',s[max(0,m.start()-220):m.end()+220]); nearby=re.sub(r'\s+',' ',html.unescape(nearby))
+              if ('新版收市後交易資訊格式說明' in nearby and 'V1.20' in nearby) or ('新版收市後交易資訊與原提供檔案對照說明' in nearby):
+                  hits.append({'text':text,'url':urllib.parse.urljoin(u,href),'context':nearby[:700]})
+          # de-duplicate exact URLs only
+          out=[]; seen=set()
+          for h in hits:
+              if h['url'] not in seen:
+                  seen.add(h['url']); out.append(h)
+          print(json.dumps({'status':status,'page_bytes':len(b),'links':out[:6]},ensure_ascii=False,indent=2))
+          PY
