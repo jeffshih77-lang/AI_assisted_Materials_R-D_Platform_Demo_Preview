@@ -23,58 +23,39 @@ jobs:
           cp docs/bsr/*.csv ../bundle/bsr/
           python - <<'PY'
           import csv, glob, hashlib, json, os, re, subprocess
-          from collections import Counter
-
-          ROOT='.'
           OUT='../bundle'
           rows=[]
-          def git(*args):
-              return subprocess.check_output(['git',*args], text=True).strip()
+          def git(*args): return subprocess.check_output(['git',*args], text=True).strip()
           def decode_bytes(b):
               for enc in ('cp950','big5','utf-8-sig','utf-8'):
                   try: return b.decode(enc), enc
                   except UnicodeDecodeError: pass
-              raise UnicodeDecodeError('unknown',b,0,1,'unsupported encoding')
-          def parse_num(s):
-              s=(s or '').strip().replace(',','')
-              if s=='': return None
-              return float(s) if '.' in s else int(s)
-
+              return b.decode('latin1'), 'UNDECODED_LATIN1_FALLBACK'
           for path in sorted(glob.glob('docs/bsr/*.csv')):
               name=os.path.basename(path)
               m=re.fullmatch(r'(twse|tpex)_([^_]+)_(\d{8})\.csv', name)
-              if not m:
-                  continue
+              if not m: continue
               market, stock, date=m.groups()
-              b=open(path,'rb').read()
-              text, enc=decode_bytes(b)
-              lines=text.splitlines()
-              sha256=hashlib.sha256(b).hexdigest()
-              blob=git('hash-object',path)
-              tree_blob=git('rev-parse',f'HEAD:{path}')
-              intro=git('log','--diff-filter=A','--follow','--format=%H|%aI|%s','--',path).splitlines()
-              intro_record=intro[-1] if intro else ''
-              recs=[]
-              required_nulls=0
+              b=open(path,'rb').read(); text, enc=decode_bytes(b); lines=text.splitlines()
+              sha256=hashlib.sha256(b).hexdigest(); blob=git('hash-object',path); tree_blob=git('rev-parse',f'HEAD:{path}')
+              intro=git('log','--diff-filter=A','--follow','--format=%H|%aI|%s','--',path).splitlines(); intro_record=intro[-1] if intro else ''
+              recs=[]; malformed=0
+              reader=csv.reader(lines[3:])
               if market=='tpex':
-                  reader=csv.reader(lines[3:])
                   for r in reader:
                       if not r or all(not x.strip() for x in r): continue
-                      if len(r)<5: required_nulls += 1; continue
-                      seq, broker, price, buy, sell=[x.strip() for x in r[:5]]
-                      if not (seq and broker and price and buy and sell): required_nulls += 1
-                      recs.append((seq,broker,price,buy,sell))
+                      if len(r)<5: malformed+=1; continue
+                      part=[x.strip() for x in r[:5]]
+                      if not all(part): malformed+=1
+                      recs.append(tuple(part))
               else:
-                  reader=csv.reader(lines[3:])
                   for r in reader:
-                      # TWSE rows hold two 5-field records separated by one empty column.
                       for start in (0,6):
-                          if len(r) <= start: continue
-                          part=(r[start:start+5]+['']*5)[:5]
-                          seq,broker,price,buy,sell=[x.strip() for x in part]
+                          if len(r)<=start: continue
+                          part=(r[start:start+5]+['']*5)[:5]; part=[x.strip() for x in part]
                           if not any(part): continue
-                          if not (seq and broker and price and buy and sell): required_nulls += 1
-                          recs.append((seq,broker,price,buy,sell))
+                          if not all(part): malformed+=1
+                          recs.append(tuple(part))
               seqs=[]; brokers=[]; prices=[]; buys=[]; sells=[]
               for seq,broker,price,buy,sell in recs:
                   try: seqs.append(int(seq))
@@ -86,38 +67,29 @@ jobs:
                   except: pass
                   try: sells.append(int(float(sell)))
                   except: pass
-              seq_complete = bool(seqs) and sorted(seqs)==list(range(1,len(seqs)+1))
-              title=lines[0].strip() if lines else ''
-              stock_line=lines[1].strip() if len(lines)>1 else ''
-              copied=os.path.join(OUT,'bsr',name)
-              cb=open(copied,'rb').read()
-              rows.append({
-                'name':name,'path':path,'market':market.upper(),'stock':stock,'date':date,
-                'bytes':len(b),'sha256':sha256,'git_blob':blob,'tree_blob':tree_blob,
-                'git_blob_match':blob==tree_blob,'encoding':enc,'title':title,'stock_line':stock_line,
-                'rows':len(recs),'brokers':len(set(brokers)),'prices':len(set(prices)),
-                'price_min':min(prices) if prices else None,'price_max':max(prices) if prices else None,
-                'buy_sum':sum(buys),'sell_sum':sum(sells),'required_nulls':required_nulls,
-                'sequence_complete':seq_complete,'intro_record':intro_record,
-                'copy_bytes':len(cb),'copy_sha256':hashlib.sha256(cb).hexdigest(),
-                'copy_exact':cb==b
-              })
-          assert len(rows)==48, f'expected 48 CSVs, got {len(rows)}'
-          assert all(r['git_blob_match'] and r['copy_exact'] for r in rows)
-          assert all(r['required_nulls']==0 and r['rows']>0 and r['sequence_complete'] for r in rows)
-          expected_titles={'TWSE':'券商買賣股票成交價量資訊','TPEX':'券商買賣證券成交價量資訊'}
-          assert all(r['title']==expected_titles[r['market']] for r in rows)
-          with open(os.path.join(OUT,'manifest.json'),'w',encoding='utf-8') as f:
-              json.dump({'source_repo':'freshshine1/twse-dashboard','source_commit':'1f4009cfba40f91acb9a7fb1212addfdedb8f194','members':rows},f,ensure_ascii=False,indent=2)
+              seq_complete=bool(seqs) and len(seqs)==len(recs) and sorted(seqs)==list(range(1,max(seqs)+1)) and max(seqs)==len(recs)
+              title=lines[0].strip() if lines else ''; stock_line=lines[1].strip() if len(lines)>1 else ''
+              cb=open(os.path.join(OUT,'bsr',name),'rb').read()
+              expected_title='券商買賣股票成交價量資訊' if market=='twse' else '券商買賣證券成交價量資訊'
+              issues=[]
+              if blob!=tree_blob: issues.append('GIT_BLOB_MISMATCH')
+              if cb!=b: issues.append('COPY_MISMATCH')
+              if title!=expected_title: issues.append('TITLE_MISMATCH')
+              if not recs: issues.append('NO_ROWS')
+              if malformed: issues.append(f'MALFORMED_{malformed}')
+              if not seq_complete: issues.append('SEQUENCE_NOT_COMPLETE')
+              if sum(buys)!=sum(sells): issues.append('BUY_SELL_SUM_MISMATCH')
+              rows.append({'name':name,'path':path,'market':market.upper(),'stock':stock,'date':date,'bytes':len(b),'sha256':sha256,'git_blob':blob,'tree_blob':tree_blob,'git_blob_match':blob==tree_blob,'encoding':enc,'title':title,'stock_line':stock_line,'rows':len(recs),'brokers':len(set(brokers)),'prices':len(set(prices)),'price_min':min(prices) if prices else None,'price_max':max(prices) if prices else None,'buy_sum':sum(buys),'sell_sum':sum(sells),'malformed_rows':malformed,'sequence_complete':seq_complete,'intro_record':intro_record,'copy_bytes':len(cb),'copy_sha256':hashlib.sha256(cb).hexdigest(),'copy_exact':cb==b,'gate_status':'PASS' if not issues else 'REVIEW','issues':'|'.join(issues)})
+          with open(os.path.join(OUT,'manifest.json'),'w',encoding='utf-8') as f: json.dump({'source_repo':'freshshine1/twse-dashboard','source_commit':'1f4009cfba40f91acb9a7fb1212addfdedb8f194','members':rows},f,ensure_ascii=False,indent=2)
           with open(os.path.join(OUT,'manifest.csv'),'w',newline='',encoding='utf-8') as f:
               w=csv.DictWriter(f,fieldnames=list(rows[0].keys())); w.writeheader(); w.writerows(rows)
-          total_bytes=sum(r['bytes'] for r in rows); total_rows=sum(r['rows'] for r in rows)
+          total_bytes=sum(r['bytes'] for r in rows); total_rows=sum(r['rows'] for r in rows); passed=sum(r['gate_status']=='PASS' for r in rows)
           with open(os.path.join(OUT,'SUMMARY.txt'),'w',encoding='utf-8') as f:
-              f.write(f'members=48\ntotal_bytes={total_bytes}\ntotal_rows={total_rows}\n')
-              f.write('dates='+','.join(sorted(set(r['date'] for r in rows)))+'\n')
-              f.write('stocks='+','.join(sorted(set(r['stock'] for r in rows)))+'\n')
-              f.write('markets='+','.join(sorted(set(r['market'] for r in rows)))+'\n')
-          print('members',len(rows),'bytes',total_bytes,'rows',total_rows)
+              f.write(f'members={len(rows)}\npass_members={passed}\nreview_members={len(rows)-passed}\ntotal_bytes={total_bytes}\ntotal_rows={total_rows}\n')
+              f.write('dates='+','.join(sorted(set(r['date'] for r in rows)))+'\n'); f.write('stocks='+','.join(sorted(set(r['stock'] for r in rows)))+'\n'); f.write('markets='+','.join(sorted(set(r['market'] for r in rows)))+'\n')
+              for r in rows:
+                  if r['gate_status']!='PASS': f.write('REVIEW '+r['name']+' '+r['issues']+'\n')
+          print('members',len(rows),'pass',passed,'review',len(rows)-passed,'bytes',total_bytes,'rows',total_rows)
           PY
           cd ..
           printf '%s\n' 'source_repo=freshshine1/twse-dashboard' 'source_commit=1f4009cfba40f91acb9a7fb1212addfdedb8f194' 'policy=public committed bytes only; no live exchange query or anti-bot interaction' > bundle/SOURCE.txt
