@@ -20,6 +20,7 @@ jobs:
       V2B_RUN: '34687211836'
       REPAIR_RUN: '34919628107'
       ALT4_RUN: '34919847312'
+      REPAIR35_RUN: '34922270944'
     steps:
       - name: Wait for 92 monthly v4 artifacts
         shell: bash
@@ -37,11 +38,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p inputs/v4 inputs/v2b inputs/repair inputs/alt4
+          mkdir -p inputs/v4 inputs/v2b inputs/repair inputs/alt4 inputs/repair35
           gh run download "$V4_RUN" -R "${{ github.repository }}" -p 'p2c-valuation-month-*-v4' -D inputs/v4
           gh run download "$V2B_RUN" -R "${{ github.repository }}" -p 'p2c-valuation-month-*-v2' -D inputs/v2b
           gh run download "$REPAIR_RUN" -R "${{ github.repository }}" -n 'p2c-valuation-repair-v3' -D inputs/repair
           gh run download "$ALT4_RUN" -R "${{ github.repository }}" -n 'p2c-tpex-4date-alt-transport-probe-v1' -D inputs/alt4
+          gh run download "$REPAIR35_RUN" -R "${{ github.repository }}" -n 'p2c-valuation-transport-repair35-v1' -D inputs/repair35
       - name: Build and independently validate PIT matrix
         shell: bash
         run: |
@@ -102,6 +104,19 @@ jobs:
             if j.get('stat')!='ok' or j.get('date')!=ymd: raise SystemExit(f'alt4 payload invalid {ymd}')
             dst=tp_out/f'{ymd}.json'; dst.write_bytes(b); provenance[str(dst.relative_to(raw))]='ALT4_SESSION_RUN_34919847312'
 
+          # Overlay all 35 transport-error dates recovered by the narrow repair35 job.
+          repair35_results=None
+          for rp in root.joinpath('repair35').rglob('RESULTS.json'):
+            repair35_results=json.loads(rp.read_text(encoding='utf-8-sig')); break
+          if repair35_results is None or len(repair35_results)!=35: raise SystemExit('repair35 RESULTS incomplete')
+          for r in repair35_results:
+            if r.get('status')!=200 or r.get('kind') not in ('DATA','NO_DATA'): raise SystemExit(f"repair35 invalid {r}")
+            ymd=r['date']; source=r['source']
+            base=root.joinpath('repair35','raw',source)
+            candidates=list(base.rglob(f'{ymd}.json')) if base.exists() else list(root.joinpath('repair35').rglob(f'{ymd}.json'))
+            if not candidates: raise SystemExit(f'repair35 missing file {source} {ymd}')
+            src=candidates[0]; dst=(tw_out if source=='TWSE_BWIBBU' else tp_out)/f'{ymd}.json'; cp(src,dst,'REPAIR35_RUN_34922270944')
+
           start,end=dt.date(2012,1,1),dt.date(2021,12,31)
           expected_days=(end-start).days+1
           missing=[]; parse_anomalies=[]; manifest=[]; rows=[]; tw_reclassified=0
@@ -153,8 +168,8 @@ jobs:
                   else: kind='OTHER'; rcount=len(data)
                 else:
                   tabs=j.get('tables'); t=tabs[0] if isinstance(tabs,list) and tabs else {}; data=t.get('data') if isinstance(t.get('data'),list) else []
-                  fields=t.get('fields'); internal=j.get('date'); stat=j.get('stat'); rcount=t.get('totalCount'); rcount=len(data) if rcount is None else rcount
-                  kind='DATA' if stat=='ok' and isinstance(rcount,int) and rcount>0 else ('NO_DATA' if stat=='ok' and (rcount==0 or not data) else 'OTHER')
+                  fields=t.get('fields'); internal=j.get('date'); stat=j.get('stat'); rcount=t.get('totalCount'); rcount=len(data) if rcount is None and isinstance(t.get('data'),list) else (rcount or 0)
+                  kind='DATA' if stat=='ok' and isinstance(rcount,int) and rcount>0 else ('NO_DATA' if stat=='ok' and rcount==0 else 'OTHER')
                 if kind=='DATA' and internal!=ymd: parse_anomalies.append({'date':ymd,'source':source,'reason':'INTERNAL_DATE_MISMATCH','internal_date':internal})
                 elif kind not in ('DATA','NO_DATA'): parse_anomalies.append({'date':ymd,'source':source,'reason':'BAD_KIND','kind':kind,'stat':j.get('stat')})
                 if kind=='DATA': emit_rows(source,ymd,j,fields,data,sha)
@@ -167,7 +182,6 @@ jobs:
           if expected_days!=3653: raise SystemExit(f'unexpected days {expected_days}')
           if len(raw_files)!=7306: missing.append({'reason':'RAW_FILE_COUNT','expected':7306,'actual':len(raw_files)})
 
-          # Deterministic normalized ordering.
           rows.sort(key=lambda x:(x['source_date'],x['market'],x['security_id']))
           cols=['source_date','available_from_date','market','security_id','security_name','pe_ratio','pb_ratio','dividend_yield_pct','dividend_per_share','dividend_year','financial_report_year','financial_report_quarter','source_system','raw_sha256']
           matrix=out/'P2C_VALUATION_PIT_2012_2021.csv'
