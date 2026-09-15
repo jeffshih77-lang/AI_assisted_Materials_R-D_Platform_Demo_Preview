@@ -1,0 +1,22 @@
+name: P2-C cancel recovery v3 once
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/p2c_cancel_recovery_v3_once.yml
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  cancel:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Cancel superseded annual recovery run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api -X POST repos/${{ github.repository }}/actions/runs/34919628107/cancel || true
