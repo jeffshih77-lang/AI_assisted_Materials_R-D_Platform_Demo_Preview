@@ -1,0 +1,55 @@
+name: P2-C TPEx four-date alternate transport probe v1
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/p2c_tpex_4date_alt_transport_probe_v1.yml
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Probe current session and legacy static transports
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import pathlib, subprocess, hashlib, json, datetime, re
+          dates=['20160530','20160825','20170117','20170127']
+          out=pathlib.Path('out_tpex_4date_probe'); out.mkdir()
+          recs=[]
+          for ymd in dates:
+            d=datetime.datetime.strptime(ymd,'%Y%m%d').date(); roc_slash=f'{d.year-1911:03d}/{d.month:02d}/{d.day:02d}'; roc6=f'{d.year-1911:03d}{d.month:02d}{d.day:02d}'
+            dd=out/ymd; dd.mkdir(); jar=dd/'cookie.txt'; page=dd/'pera_page.html'
+            subprocess.run(['curl','-k','-L','-sS','--retry','3','--retry-all-errors','-A','Mozilla/5.0 P2-C-AltProbe/1.0','-c',str(jar),'-o',str(page),'https://www.tpex.org.tw/web/stock/aftertrading/peratio_analysis/pera.php?l=zh-tw'],capture_output=True,text=True)
+            urls=[('current_session',f'https://www.tpex.org.tw/web/stock/aftertrading/peratio_analysis/pera_result.php?l=zh-tw&o=json&d={roc_slash}&c=',True),('legacy_static',f'https://hist.tpex.org.tw/Hist/STOCK/AFTERTRADING/PERATIO_ANALYSIS/RSTA3103_{roc6}.HTML',False)]
+            for label,url,use_cookie in urls:
+              body=dd/f'{label}.body'; hdr=dd/f'{label}.headers.txt'
+              cmd=['curl','-k','-L','-sS','--retry','8','--retry-all-errors','--retry-delay','2','--connect-timeout','15','--max-time','120','-A','Mozilla/5.0 P2-C-AltProbe/1.0','-e','https://www.tpex.org.tw/web/stock/aftertrading/peratio_analysis/pera.php?l=zh-tw','-D',str(hdr),'-o',str(body),'-w','%{http_code}\t%{url_effective}',url]
+              if use_cookie: cmd[1:1]=['-b',str(jar)]
+              p=subprocess.run(cmd,capture_output=True,text=True); parts=(p.stdout or '').strip().split('\t',1); status=int(parts[0]) if parts and parts[0].isdigit() else None; b=body.read_bytes() if body.exists() else b''
+              kind='UNPARSED'; rows=None; internal=None; encoding=None
+              if label=='current_session':
+                try:
+                  j=json.loads(b.decode('utf-8-sig')); tabs=j.get('tables'); t=tabs[0] if isinstance(tabs,list) and tabs else {}; rows=t.get('totalCount'); rows=len(t.get('data',[])) if rows is None and isinstance(t.get('data'),list) else (rows or 0); internal=j.get('date'); kind='DATA' if j.get('stat')=='ok' and rows>0 else ('NO_DATA' if j.get('stat')=='ok' and rows==0 else 'OTHER')
+                except Exception: pass
+              else:
+                best=None
+                for enc in ['cp950','big5','utf-8']:
+                  text=b.decode(enc,errors='replace'); bad=text.count('�')
+                  if best is None or bad<best[0]: best=(bad,enc,text)
+                _,encoding,text=best
+                mdate=re.search(r'交易日期\s*[:：]?\s*([0-9]+)年([0-9]+)月([0-9]+)日',text); rows=len(re.findall(r'<tr[^>]*>\s*<TD[^>]*>\s*\d{4,6}\s*</td>',text,re.I|re.S)); internal='/'.join(mdate.groups()) if mdate else None; security='FOR SECURITY REASONS' in text.upper(); kind='DATA' if status==200 and rows>0 and not security else ('NO_DATA' if status==200 and rows==0 and not security else 'OTHER')
+              rec={'date':ymd,'transport':label,'url':url,'status':status,'curl_rc':p.returncode,'bytes':len(b),'sha256':hashlib.sha256(b).hexdigest(),'kind':kind,'rows':rows,'internal_date':internal,'encoding':encoding}; recs.append(rec); print(json.dumps(rec,ensure_ascii=False))
+          (out/'RESULTS.json').write_text(json.dumps(recs,ensure_ascii=False,indent=2)+'\n')
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: p2c-tpex-4date-alt-transport-probe-v1
+          path: out_tpex_4date_probe/
+          retention-days: 7
