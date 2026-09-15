@@ -1,0 +1,63 @@
+name: P2-C valuation 35-date transport repair v1
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/p2c_valuation_35date_transport_repair_v1.yml
+
+permissions:
+  contents: read
+
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Repair exact 35 transport-error dates
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import subprocess,pathlib,json,datetime,hashlib,time,sys
+          tpex='20120721 20120919 20120926 20120930 20130103 20130113 20130131 20130608 20130617 20130819 20131017 20140802 20141107 20151004 20151009 20151014 20151018 20151022 20151030 20151031 20151202 20180501 20180504 20180509 20180515 20180518 20180522 20180524 20180716 20180918 20190910 20200718 20210501 20211001'.split()
+          twse=['20190623']
+          out=pathlib.Path('out_p2c_transport_repair35_v1'); tp=out/'raw'/'TPEX_PERATIO'; tw=out/'raw'/'TWSE_BWIBBU'; tp.mkdir(parents=True); tw.mkdir(parents=True)
+          jar=out/'tpex_cookie.txt'; UA='Mozilla/5.0 P2-C-PIT-Repair35/1.0'
+          # Establish official TPEx page session once, then reuse cookies/referer.
+          subprocess.run(['curl','-k','-L','-sS','--retry','6','--retry-all-errors','--retry-delay','1','-A',UA,'-c',str(jar),'-o','/dev/null','https://www.tpex.org.tw/web/stock/aftertrading/peratio_analysis/pera.php?l=zh-tw'],check=True)
+          recs=[]; bad=[]
+          def run(cmd):
+            p=subprocess.run(cmd,capture_output=True,text=True); q=(p.stdout or '').strip().split('\t',1); status=int(q[0]) if q and q[0].isdigit() else None; return p,status,(q[1] if len(q)>1 else None)
+          for ymd in tpex:
+            d=datetime.datetime.strptime(ymd,'%Y%m%d').date(); roc=f'{d.year-1911:03d}/{d.month:02d}/{d.day:02d}'; url=f'https://www.tpex.org.tw/web/stock/aftertrading/peratio_analysis/pera_result.php?l=zh-tw&o=json&d={roc}&c='; dest=tp/f'{ymd}.json'
+            cmd=['curl','-k','-L','-sS','--show-error','--retry','12','--retry-all-errors','--retry-delay','2','--connect-timeout','15','--max-time','180','-A',UA,'-b',str(jar),'-e','https://www.tpex.org.tw/web/stock/aftertrading/peratio_analysis/pera.php?l=zh-tw','-H','Accept: */*','-H','Accept-Encoding: identity','-o',str(dest),'-w','%{http_code}\t%{url_effective}',url]
+            p,status,final=run(cmd); b=dest.read_bytes() if dest.exists() else b''; kind='UNPARSED'; rows=None; internal=None
+            try:
+              j=json.loads(b.decode('utf-8-sig')); internal=j.get('date'); tabs=j.get('tables'); t=tabs[0] if isinstance(tabs,list) and tabs else {}; rows=t.get('totalCount'); rows=len(t.get('data',[])) if rows is None and isinstance(t.get('data'),list) else (rows or 0); kind='DATA' if j.get('stat')=='ok' and rows>0 else ('NO_DATA' if j.get('stat')=='ok' and rows==0 else 'OTHER')
+            except Exception: pass
+            r={'source':'TPEX_PERATIO','date':ymd,'status':status,'curl_rc':p.returncode,'bytes':len(b),'sha256':hashlib.sha256(b).hexdigest(),'kind':kind,'rows':rows,'internal_date':internal,'final_url':final}; recs.append(r)
+            if status!=200 or p.returncode!=0 or kind not in ('DATA','NO_DATA') or (kind=='DATA' and internal!=ymd): bad.append(r)
+            time.sleep(.2)
+          for ymd in twse:
+            url=f'https://www.twse.com.tw/exchangeReport/BWIBBU_d?response=json&date={ymd}&selectType=ALL'; dest=tw/f'{ymd}.json'
+            cmd=['curl','-L','-sS','--show-error','--retry','12','--retry-all-errors','--retry-delay','2','--connect-timeout','15','--max-time','180','-A',UA,'-H','Accept: */*','-H','Accept-Encoding: identity','-o',str(dest),'-w','%{http_code}\t%{url_effective}',url]
+            p,status,final=run(cmd); b=dest.read_bytes() if dest.exists() else b''; kind='UNPARSED'; rows=None; internal=None
+            try:
+              j=json.loads(b.decode('utf-8-sig')); internal=j.get('date'); data=j.get('data') if isinstance(j.get('data'),list) else []; rows=len(data); stat=str(j.get('stat','')); kind='DATA' if stat=='OK' and rows>0 else ('NO_DATA' if (stat=='OK' and rows==0) or (j.get('total')==0 and '沒有符合條件' in stat) else 'OTHER')
+            except Exception: pass
+            r={'source':'TWSE_BWIBBU','date':ymd,'status':status,'curl_rc':p.returncode,'bytes':len(b),'sha256':hashlib.sha256(b).hexdigest(),'kind':kind,'rows':rows,'internal_date':internal,'final_url':final}; recs.append(r)
+            if status!=200 or p.returncode!=0 or kind not in ('DATA','NO_DATA') or (kind=='DATA' and internal!=ymd): bad.append(r)
+          (out/'RESULTS.json').write_text(json.dumps(recs,ensure_ascii=False,sort_keys=True,indent=2)+'\n')
+          (out/'SUMMARY.json').write_text(json.dumps({'requested':35,'valid':35-len(bad),'bad':len(bad),'bad_dates':[x['date'] for x in bad]},ensure_ascii=False,sort_keys=True,indent=2)+'\n')
+          print(json.dumps({'requested':35,'valid':35-len(bad),'bad':len(bad),'bad_dates':[x['date'] for x in bad]},ensure_ascii=False))
+          if bad: sys.exit(2)
+          PY
+      - name: Upload repair evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: p2c-valuation-transport-repair35-v1
+          path: out_p2c_transport_repair35_v1/
+          if-no-files-found: error
+          retention-days: 7
