@@ -1,0 +1,212 @@
+name: P2-C valuation PIT consolidate 2012-2021 v5
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/p2c_valuation_consolidate_2012_2021_v5.yml
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  consolidate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      GH_TOKEN: ${{ github.token }}
+      V4_RUN: '34920613193'
+      V2B_RUN: '34687211836'
+      REPAIR_RUN: '34919628107'
+      ALT4_RUN: '34919847312'
+    steps:
+      - name: Wait for 92 monthly v4 artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          count=0
+          for i in $(seq 1 80); do
+            count=$(gh api "repos/${{ github.repository }}/actions/runs/${V4_RUN}/artifacts?per_page=100" --jq '[.artifacts[] | select(.name | startswith("p2c-valuation-month-") and endswith("-v4"))] | length')
+            echo "v4 artifact count=${count}/92"
+            if [ "$count" -eq 92 ]; then break; fi
+            sleep 15
+          done
+          test "$count" -eq 92
+      - name: Download immutable source artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p inputs/v4 inputs/v2b inputs/repair inputs/alt4
+          gh run download "$V4_RUN" -p 'p2c-valuation-month-*-v4' -D inputs/v4
+          gh run download "$V2B_RUN" -p 'p2c-valuation-month-*-v2' -D inputs/v2b
+          gh run download "$REPAIR_RUN" -n 'p2c-valuation-repair-v3' -D inputs/repair
+          gh run download "$ALT4_RUN" -n 'p2c-tpex-4date-alt-transport-probe-v1' -D inputs/alt4
+      - name: Build and independently validate PIT matrix
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import csv, datetime as dt, hashlib, json, pathlib, shutil, sys
+
+          root=pathlib.Path('inputs')
+          out=pathlib.Path('P2C_VALUATION_PIT_2012_2021_V5')
+          raw=out/'raw'; tw_out=raw/'TWSE_BWIBBU'; tp_out=raw/'TPEX_PERATIO'
+          tw_out.mkdir(parents=True); tp_out.mkdir(parents=True)
+          provenance={}
+
+          def cp(src,dst,lineage):
+            shutil.copy2(src,dst)
+            provenance[str(dst.relative_to(raw))]=lineage
+
+          # V4: 2012-2015 and 2018-05 through 2021; exact raw bytes.
+          for p in root.joinpath('v4').rglob('*.json'):
+            if p.parent.name not in ('TWSE_BWIBBU','TPEX_PERATIO'): continue
+            ymd=p.stem
+            if len(ymd)!=8 or not ymd.isdigit(): continue
+            d=dt.datetime.strptime(ymd,'%Y%m%d').date()
+            if not (dt.date(2012,1,1)<=d<=dt.date(2015,12,31) or dt.date(2018,5,1)<=d<=dt.date(2021,12,31)): continue
+            dst=(tw_out if p.parent.name=='TWSE_BWIBBU' else tp_out)/p.name
+            cp(p,dst,'V4_MONTHLY_RUN_34920613193')
+
+          # V2B: reuse already captured 2016-01 through 2018-04; no re-download from source.
+          for p in root.joinpath('v2b').rglob('*.json'):
+            if p.parent.name not in ('TWSE_BWIBBU','TPEX_PERATIO'): continue
+            ymd=p.stem
+            if len(ymd)!=8 or not ymd.isdigit(): continue
+            d=dt.datetime.strptime(ymd,'%Y%m%d').date()
+            if not (dt.date(2016,1,1)<=d<=dt.date(2018,4,30)): continue
+            dst=(tw_out if p.parent.name=='TWSE_BWIBBU' else tp_out)/p.name
+            cp(p,dst,'V2B_REUSED_RUN_34687211836')
+
+          # Overlay valid TPEx repair payloads from the 23-date repair job.
+          for p in root.joinpath('repair').rglob('*.json'):
+            if p.parent.name!='TPEX_PERATIO' or len(p.stem)!=8 or not p.stem.isdigit(): continue
+            try:
+              j=json.loads(p.read_text(encoding='utf-8-sig'))
+            except Exception:
+              continue
+            if j.get('stat')=='ok': cp(p,tp_out/f'{p.stem}.json','REPAIR_V3_RUN_34919628107')
+
+          # Overlay the four persistent dates recovered with an official TPEx page session.
+          alt_results=None
+          for rp in root.joinpath('alt4').rglob('RESULTS.json'):
+            alt_results=json.loads(rp.read_text(encoding='utf-8-sig')); break
+          if alt_results is None: raise SystemExit('missing alt4 RESULTS.json')
+          good4={r['date'] for r in alt_results if r.get('transport')=='current_session' and r.get('status')==200 and r.get('kind') in ('DATA','NO_DATA')}
+          expected4={'20160530','20160825','20170117','20170127'}
+          if good4!=expected4: raise SystemExit(f'alt4 incomplete: {good4}')
+          for ymd in sorted(expected4):
+            src=next(root.joinpath('alt4').rglob(f'{ymd}/current_session.body'))
+            b=src.read_bytes(); j=json.loads(b.decode('utf-8-sig'))
+            if j.get('stat')!='ok' or j.get('date')!=ymd: raise SystemExit(f'alt4 payload invalid {ymd}')
+            dst=tp_out/f'{ymd}.json'; dst.write_bytes(b); provenance[str(dst.relative_to(raw))]='ALT4_SESSION_RUN_34919847312'
+
+          start,end=dt.date(2012,1,1),dt.date(2021,12,31)
+          expected_days=(end-start).days+1
+          missing=[]; parse_anomalies=[]; manifest=[]; rows=[]; tw_reclassified=0
+
+          def nval(v):
+            if v is None: return ''
+            s=str(v).strip().replace(',','')
+            return '' if s in ('','-','--','N/A','NA','nan') else s
+
+          def emit_rows(source,ymd,j,fields,data,sha):
+            idx={str(x):i for i,x in enumerate(fields or [])}
+            def val(row,*names):
+              for name in names:
+                if name in idx and idx[name] < len(row): return row[idx[name]]
+              return None
+            sd=dt.datetime.strptime(ymd,'%Y%m%d').date()
+            av=sd+dt.timedelta(days=1)
+            for row in data:
+              if source=='TWSE_BWIBBU':
+                sec=val(row,'證券代號'); name=val(row,'證券名稱'); pe=val(row,'本益比'); dy=val(row,'殖利率(%)'); pb=val(row,'股價淨值比')
+                dps=None; dyyr=None; fry=val(row,'財報年'); frq=val(row,'財報季')
+                market='TWSE'
+              else:
+                sec=val(row,'股票代號'); name=val(row,'公司名稱'); pe=val(row,'本益比'); dps=val(row,'每股股利'); dyyr=val(row,'股利年度'); dy=val(row,'殖利率(%)'); pb=val(row,'股價淨值比'); fry=None; frq=None
+                market='TPEX'
+              if not sec: continue
+              rows.append({
+                'source_date':sd.isoformat(),'available_from_date':av.isoformat(),'market':market,'security_id':str(sec).strip(),'security_name':str(name or '').strip(),
+                'pe_ratio':nval(pe),'pb_ratio':nval(pb),'dividend_yield_pct':nval(dy),'dividend_per_share':nval(dps),'dividend_year':nval(dyyr),
+                'financial_report_year':nval(fry),'financial_report_quarter':nval(frq),'source_system':source,'raw_sha256':sha
+              })
+
+          d=start
+          while d<=end:
+            ymd=d.strftime('%Y%m%d')
+            for source,base in [('TWSE_BWIBBU',tw_out),('TPEX_PERATIO',tp_out)]:
+              p=base/f'{ymd}.json'
+              if not p.exists(): missing.append({'date':ymd,'source':source}); continue
+              b=p.read_bytes(); sha=hashlib.sha256(b).hexdigest(); kind='UNPARSED'; rcount=None; fields=None; internal=None
+              try:
+                j=json.loads(b.decode('utf-8-sig'))
+                if source=='TWSE_BWIBBU':
+                  data=j.get('data') if isinstance(j.get('data'),list) else []
+                  fields=j.get('fields'); internal=j.get('date'); stat=str(j.get('stat',''))
+                  if stat=='OK' and data: kind='DATA'; rcount=len(data)
+                  elif (stat=='OK' and not data) or (j.get('total')==0 and '沒有符合條件' in stat):
+                    kind='NO_DATA'; rcount=0
+                    if stat!='OK': tw_reclassified+=1
+                  else: kind='OTHER'; rcount=len(data)
+                else:
+                  tabs=j.get('tables'); t=tabs[0] if isinstance(tabs,list) and tabs else {}; data=t.get('data') if isinstance(t.get('data'),list) else []
+                  fields=t.get('fields'); internal=j.get('date'); stat=j.get('stat'); rcount=t.get('totalCount'); rcount=len(data) if rcount is None else rcount
+                  kind='DATA' if stat=='ok' and isinstance(rcount,int) and rcount>0 else ('NO_DATA' if stat=='ok' and (rcount==0 or not data) else 'OTHER')
+                if kind=='DATA' and internal!=ymd: parse_anomalies.append({'date':ymd,'source':source,'reason':'INTERNAL_DATE_MISMATCH','internal_date':internal})
+                elif kind not in ('DATA','NO_DATA'): parse_anomalies.append({'date':ymd,'source':source,'reason':'BAD_KIND','kind':kind,'stat':j.get('stat')})
+                if kind=='DATA': emit_rows(source,ymd,j,fields,data,sha)
+              except Exception as e:
+                parse_anomalies.append({'date':ymd,'source':source,'reason':'PARSE_ERROR','error':f'{type(e).__name__}:{e}'})
+              manifest.append({'date':ymd,'source':source,'kind':kind,'rows':rcount,'sha256':sha,'bytes':len(b),'lineage':provenance.get(str(p.relative_to(raw)),'UNKNOWN')})
+            d+=dt.timedelta(days=1)
+
+          raw_files=list(raw.rglob('*.json'))
+          if expected_days!=3653: raise SystemExit(f'unexpected days {expected_days}')
+          if len(raw_files)!=7306: missing.append({'reason':'RAW_FILE_COUNT','expected':7306,'actual':len(raw_files)})
+
+          # Deterministic normalized ordering.
+          rows.sort(key=lambda x:(x['source_date'],x['market'],x['security_id']))
+          cols=['source_date','available_from_date','market','security_id','security_name','pe_ratio','pb_ratio','dividend_yield_pct','dividend_per_share','dividend_year','financial_report_year','financial_report_quarter','source_system','raw_sha256']
+          matrix=out/'P2C_VALUATION_PIT_2012_2021.csv'
+          with matrix.open('w',newline='',encoding='utf-8') as f:
+            w=csv.DictWriter(f,fieldnames=cols); w.writeheader(); w.writerows(rows)
+          (out/'RAW_MANIFEST.jsonl').write_text(''.join(json.dumps(x,ensure_ascii=False,sort_keys=True)+'\n' for x in manifest),encoding='utf-8')
+          (out/'ANOMALIES.json').write_text(json.dumps({'missing':missing,'parse_anomalies':parse_anomalies},ensure_ascii=False,sort_keys=True,indent=2)+'\n',encoding='utf-8')
+          (out/'PIT_CONTRACT.json').write_text(json.dumps({
+            'source_date_semantics':'official daily valuation report date D','available_from_date_rule':'D + 1 calendar day','join_rule':'source_date < model_trade_date',
+            'same_day_use':'FORBIDDEN','zero_fill':'FORBIDDEN','synthetic_backfill':'FORBIDDEN','source_boundary_missing':'NaN/empty',
+            'fields':['PE','PB','DividendYield','TPExDividendPerShare','TPExDividendYear','TWSEFinancialReportYearQuarter_when_published']
+          },ensure_ascii=False,sort_keys=True,indent=2)+'\n',encoding='utf-8')
+          summary={
+            'status':'PASS' if not missing and not parse_anomalies else 'FAIL','date_range':'2012-01-01..2021-12-31','calendar_days':expected_days,
+            'expected_raw_files':7306,'actual_raw_files':len(raw_files),'normalized_rows':len(rows),'twse_no_data_reclassified':tw_reclassified,
+            'missing_count':len(missing),'parse_anomaly_count':len(parse_anomalies),
+            'twse_data_days':sum(x['source']=='TWSE_BWIBBU' and x['kind']=='DATA' for x in manifest),'twse_no_data_days':sum(x['source']=='TWSE_BWIBBU' and x['kind']=='NO_DATA' for x in manifest),
+            'tpex_data_days':sum(x['source']=='TPEX_PERATIO' and x['kind']=='DATA' for x in manifest),'tpex_no_data_days':sum(x['source']=='TPEX_PERATIO' and x['kind']=='NO_DATA' for x in manifest),
+            'lineage_counts':{}
+          }
+          for x in manifest: summary['lineage_counts'][x['lineage']]=summary['lineage_counts'].get(x['lineage'],0)+1
+          (out/'SUMMARY.json').write_text(json.dumps(summary,ensure_ascii=False,sort_keys=True,indent=2)+'\n',encoding='utf-8')
+
+          raw_sums=[]
+          for p in sorted(raw_files): raw_sums.append(f"{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.relative_to(out)}")
+          (out/'RAW_SHA256SUMS.txt').write_text('\n'.join(raw_sums)+'\n',encoding='utf-8')
+          top=[]
+          for p in sorted(x for x in out.iterdir() if x.is_file() and x.name!='SHA256SUMS.txt'):
+            top.append(f"{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.name}")
+          (out/'SHA256SUMS.txt').write_text('\n'.join(top)+'\n',encoding='utf-8')
+          print(json.dumps(summary,ensure_ascii=False,indent=2))
+          if summary['status']!='PASS': sys.exit(2)
+          PY
+      - name: Upload canonical PIT package
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: p2c-valuation-pit-2012-2021-v5
+          path: P2C_VALUATION_PIT_2012_2021_V5/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 6
