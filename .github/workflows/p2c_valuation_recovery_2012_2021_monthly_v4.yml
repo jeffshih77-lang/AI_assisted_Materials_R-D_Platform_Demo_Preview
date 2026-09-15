@@ -1,0 +1,64 @@
+name: P2-C valuation PIT monthly recovery 2012-2021 v4
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/p2c_valuation_recovery_2012_2021_monthly_v4.yml
+
+permissions:
+  contents: read
+
+jobs:
+  recover_month:
+    strategy:
+      fail-fast: false
+      max-parallel: 6
+      matrix:
+        ym: [2012-01,2012-02,2012-03,2012-04,2012-05,2012-06,2012-07,2012-08,2012-09,2012-10,2012-11,2012-12,2013-01,2013-02,2013-03,2013-04,2013-05,2013-06,2013-07,2013-08,2013-09,2013-10,2013-11,2013-12,2014-01,2014-02,2014-03,2014-04,2014-05,2014-06,2014-07,2014-08,2014-09,2014-10,2014-11,2014-12,2015-01,2015-02,2015-03,2015-04,2015-05,2015-06,2015-07,2015-08,2015-09,2015-10,2015-11,2015-12,2018-05,2018-06,2018-07,2018-08,2018-09,2018-10,2018-11,2018-12,2019-01,2019-02,2019-03,2019-04,2019-05,2019-06,2019-07,2019-08,2019-09,2019-10,2019-11,2019-12,2020-01,2020-02,2020-03,2020-04,2020-05,2020-06,2020-07,2020-08,2020-09,2020-10,2020-11,2020-12,2021-01,2021-02,2021-03,2021-04,2021-05,2021-06,2021-07,2021-08,2021-09,2021-10,2021-11,2021-12]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      YM: ${{ matrix.ym }}
+    steps:
+      - name: Recover one month with TPEx session reuse
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import subprocess,pathlib,hashlib,json,datetime,time,os,calendar,sys
+          ym=os.environ['YM']; y,m=map(int,ym.split('-')); start=datetime.date(y,m,1); end=datetime.date(y,m,calendar.monthrange(y,m)[1])
+          out=pathlib.Path(f'out_p2c_month_{y}{m:02d}'); tw=out/'raw'/'TWSE_BWIBBU'; tp=out/'raw'/'TPEX_PERATIO'; tw.mkdir(parents=True); tp.mkdir(parents=True)
+          UA='Mozilla/5.0 P2-C-PIT-Recovery/4.0'; manifest=[]; anomalies=[]; jar=out/'tpex_cookie.txt'
+          subprocess.run(['curl','-k','-L','-sS','--retry','4','--retry-all-errors','-A',UA,'-c',str(jar),'-o','/dev/null','https://www.tpex.org.tw/web/stock/aftertrading/peratio_analysis/pera.php?l=zh-tw'],capture_output=True,text=True)
+          def get(url,dest,insecure=False,cookie=False):
+            cmd=['curl','-L','-sS','--retry','6','--retry-all-errors','--retry-delay','1','--connect-timeout','15','--max-time','90','-A',UA,'-H','Accept: */*','-H','Accept-Encoding: identity','-o',str(dest),'-w','%{http_code}\t%{url_effective}',url]
+            if insecure: cmd.insert(1,'-k')
+            if cookie: cmd[1:1]=['-b',str(jar),'-e','https://www.tpex.org.tw/web/stock/aftertrading/peratio_analysis/pera.php?l=zh-tw']
+            p=subprocess.run(cmd,capture_output=True,text=True); q=(p.stdout or '').strip().split('\t',1); status=int(q[0]) if q and q[0].isdigit() else None; body=dest.read_bytes() if dest.exists() else b''; return status,(q[1] if len(q)>1 else url),body,p.returncode,(p.stderr or '').strip()
+          def ctw(b):
+            try:
+              j=json.loads(b.decode('utf-8-sig')); rows=len(j.get('data',[])) if isinstance(j.get('data'),list) else 0; kind='DATA' if j.get('stat')=='OK' and rows>0 else ('NO_DATA' if j.get('stat')=='OK' and rows==0 else 'OTHER'); return kind,rows,j.get('date'),j.get('fields')
+            except Exception: return 'UNPARSED',None,None,None
+          def ctp(b):
+            try:
+              j=json.loads(b.decode('utf-8-sig')); tabs=j.get('tables'); t=tabs[0] if isinstance(tabs,list) and tabs else {}; rows=t.get('totalCount'); rows=len(t.get('data',[])) if rows is None and isinstance(t.get('data'),list) else (rows or 0); kind='DATA' if j.get('stat')=='ok' and rows>0 else ('NO_DATA' if j.get('stat')=='ok' and rows==0 else 'OTHER'); return kind,rows,j.get('date'),t.get('fields')
+            except Exception: return 'UNPARSED',None,None,None
+          d=start
+          while d<=end:
+            ymd=d.strftime('%Y%m%d')
+            u=f'https://www.twse.com.tw/exchangeReport/BWIBBU_d?response=json&date={ymd}&selectType=ALL'; dest=tw/f'{ymd}.json'; s,f,b,rc,err=get(u,dest); kind,rows,internal,fields=ctw(b); rec={'source':'TWSE_BWIBBU','date':ymd,'status':s,'curl_rc':rc,'bytes':len(b),'sha256':hashlib.sha256(b).hexdigest(),'kind':kind,'rows':rows,'internal_date':internal,'fields':fields,'url':u,'final_url':f,'error':err or None}; manifest.append(rec); anomalies += [rec] if s!=200 or rc!=0 or kind not in ('DATA','NO_DATA') or (kind=='DATA' and internal!=ymd) else []
+            roc=f'{d.year-1911:03d}/{d.month:02d}/{d.day:02d}'; u=f'https://www.tpex.org.tw/web/stock/aftertrading/peratio_analysis/pera_result.php?l=zh-tw&o=json&d={roc}&c='; dest=tp/f'{ymd}.json'; s,f,b,rc,err=get(u,dest,True,True); kind,rows,internal,fields=ctp(b); rec={'source':'TPEX_PERATIO','date':ymd,'status':s,'curl_rc':rc,'bytes':len(b),'sha256':hashlib.sha256(b).hexdigest(),'kind':kind,'rows':rows,'internal_date':internal,'fields':fields,'url':u,'final_url':f,'error':err or None}; manifest.append(rec); anomalies += [rec] if s!=200 or rc!=0 or kind not in ('DATA','NO_DATA') or (kind=='DATA' and internal!=ymd) else []
+            d+=datetime.timedelta(days=1); time.sleep(0.05)
+          summary={'ym':ym,'records':len(manifest),'anomaly_count':len(anomalies),'twse_data':sum(x['source']=='TWSE_BWIBBU' and x['kind']=='DATA' for x in manifest),'tpex_data':sum(x['source']=='TPEX_PERATIO' and x['kind']=='DATA' for x in manifest)}
+          (out/'MANIFEST.jsonl').write_text(''.join(json.dumps(x,ensure_ascii=False,sort_keys=True)+'\n' for x in manifest)); (out/'ANOMALIES.jsonl').write_text(''.join(json.dumps(x,ensure_ascii=False,sort_keys=True)+'\n' for x in anomalies)); (out/'SUMMARY.json').write_text(json.dumps(summary,ensure_ascii=False,indent=2)+'\n'); print(json.dumps(summary,ensure_ascii=False))
+          if anomalies: sys.exit(2)
+          PY
+      - name: Upload month
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: p2c-valuation-month-${{ matrix.ym }}-v4
+          path: out_p2c_month_*/
+          if-no-files-found: error
+          retention-days: 7
