@@ -1,0 +1,246 @@
+name: P2-C valuation PIT recovery 2012-2021 v3
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/p2c_valuation_recovery_2012_2021_v3.yml
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  recover_ranges:
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        include:
+          - {tag: '2012', start: '2012-01-01', end: '2012-12-31'}
+          - {tag: '2013', start: '2013-01-01', end: '2013-12-31'}
+          - {tag: '2014', start: '2014-01-01', end: '2014-12-31'}
+          - {tag: '2015', start: '2015-01-01', end: '2015-12-31'}
+          - {tag: '2018M05M12', start: '2018-05-01', end: '2018-12-31'}
+          - {tag: '2019', start: '2019-01-01', end: '2019-12-31'}
+          - {tag: '2020', start: '2020-01-01', end: '2020-12-31'}
+          - {tag: '2021', start: '2021-01-01', end: '2021-12-31'}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      RANGE_TAG: ${{ matrix.tag }}
+      START_DATE: ${{ matrix.start }}
+      END_DATE: ${{ matrix.end }}
+    steps:
+      - name: Recover official valuation raw range
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import subprocess, pathlib, hashlib, json, datetime, time, os, sys
+
+          tag=os.environ['RANGE_TAG']; start=datetime.date.fromisoformat(os.environ['START_DATE']); end=datetime.date.fromisoformat(os.environ['END_DATE'])
+          out=pathlib.Path(f'out_p2c_recovery_{tag}'); tw=out/'raw'/'TWSE_BWIBBU'; tp=out/'raw'/'TPEX_PERATIO'; tw.mkdir(parents=True); tp.mkdir(parents=True)
+          UA='Mozilla/5.0 P2-C-PIT-Recovery/3.0'; manifest=[]; anomalies=[]
+
+          def fetch(url, dest, insecure=False):
+            hdr=dest.with_suffix(dest.suffix+'.headers.txt')
+            cmd=['curl','-L','--silent','--show-error','--retry','6','--retry-all-errors','--retry-delay','1','--connect-timeout','15','--max-time','90','-A',UA,'-H','Accept: */*','-H','Accept-Encoding: identity','-D',str(hdr),'-o',str(dest),'-w','%{http_code}\t%{url_effective}',url]
+            if insecure: cmd.insert(1,'-k')
+            p=subprocess.run(cmd,capture_output=True,text=True)
+            info=(p.stdout or '').strip().split('\t',1); status=int(info[0]) if info and info[0].isdigit() else None; final=info[1] if len(info)>1 else url
+            body=dest.read_bytes() if dest.exists() else b''
+            return status,final,body,p.returncode,(p.stderr or '').strip()
+
+          def classify_tw(b):
+            r={'kind':'UNPARSED','rows':None,'internal_date':None,'fields':None,'stat':None}
+            try:
+              j=json.loads(b.decode('utf-8-sig')); r['stat']=j.get('stat'); r['internal_date']=j.get('date'); r['fields']=j.get('fields'); data=j.get('data'); r['rows']=len(data) if isinstance(data,list) else 0
+              r['kind']='DATA' if r['stat']=='OK' and r['rows']>0 else ('NO_DATA' if r['stat']=='OK' and r['rows']==0 else 'OTHER')
+            except Exception as e: r['parse_error']=f'{type(e).__name__}:{e}'
+            return r
+
+          def classify_tp(b):
+            r={'kind':'UNPARSED','rows':None,'internal_date':None,'fields':None,'stat':None}
+            try:
+              j=json.loads(b.decode('utf-8-sig')); r['stat']=j.get('stat'); r['internal_date']=j.get('date'); tabs=j.get('tables')
+              if isinstance(tabs,list) and tabs:
+                t=tabs[0]; r['fields']=t.get('fields'); rows=t.get('totalCount'); rows=len(t.get('data',[])) if rows is None and isinstance(t.get('data'),list) else rows; r['rows']=rows
+              else: r['rows']=0
+              r['kind']='DATA' if r['stat']=='ok' and isinstance(r['rows'],int) and r['rows']>0 else ('NO_DATA' if r['stat']=='ok' and r['rows']==0 else 'OTHER')
+            except Exception as e: r['parse_error']=f'{type(e).__name__}:{e}'
+            return r
+
+          d=start
+          while d<=end:
+            ymd=d.strftime('%Y%m%d')
+            u=f'https://www.twse.com.tw/exchangeReport/BWIBBU_d?response=json&date={ymd}&selectType=ALL'; dest=tw/f'{ymd}.json'; s,f,b,rc,err=fetch(u,dest,False); c=classify_tw(b)
+            m={'capture':'RECOVERY_V3','source':'TWSE_BWIBBU','date':ymd,'url':u,'final_url':f,'status':s,'curl_rc':rc,'curl_stderr':err or None,'bytes':len(b),'sha256':hashlib.sha256(b).hexdigest(),'fetched_at_utc':datetime.datetime.now(datetime.timezone.utc).isoformat(),'tls_verified':True,**c}; manifest.append(m)
+            if s!=200 or rc!=0 or c['kind'] not in ('DATA','NO_DATA') or (c['kind']=='DATA' and c['internal_date']!=ymd): anomalies.append(m)
+            time.sleep(0.10)
+            roc=f'{d.year-1911:03d}/{d.month:02d}/{d.day:02d}'; u=f'https://www.tpex.org.tw/web/stock/aftertrading/peratio_analysis/pera_result.php?l=zh-tw&o=json&d={roc}&c='; dest=tp/f'{ymd}.json'; s,f,b,rc,err=fetch(u,dest,True); c=classify_tp(b)
+            m={'capture':'RECOVERY_V3','source':'TPEX_PERATIO','date':ymd,'url':u,'final_url':f,'status':s,'curl_rc':rc,'curl_stderr':err or None,'bytes':len(b),'sha256':hashlib.sha256(b).hexdigest(),'fetched_at_utc':datetime.datetime.now(datetime.timezone.utc).isoformat(),'tls_verified':False,'tls_exception':'SERVER_CHAIN_NOT_VERIFIABLE_ON_GHA_UBUNTU_QUALIFIED_RECORDED_IN_P2C_SOURCE_CONTRACT',**c}; manifest.append(m)
+            if s!=200 or rc!=0 or c['kind'] not in ('DATA','NO_DATA') or (c['kind']=='DATA' and c['internal_date']!=ymd): anomalies.append(m)
+            time.sleep(0.10); d+=datetime.timedelta(days=1)
+
+          summary={'tag':tag,'start':start.isoformat(),'end':end.isoformat(),'records':len(manifest),'twse_data':sum(x['source']=='TWSE_BWIBBU' and x['kind']=='DATA' for x in manifest),'twse_no_data':sum(x['source']=='TWSE_BWIBBU' and x['kind']=='NO_DATA' for x in manifest),'tpex_data':sum(x['source']=='TPEX_PERATIO' and x['kind']=='DATA' for x in manifest),'tpex_no_data':sum(x['source']=='TPEX_PERATIO' and x['kind']=='NO_DATA' for x in manifest),'anomaly_count':len(anomalies)}
+          (out/'MANIFEST.jsonl').write_text(''.join(json.dumps(x,ensure_ascii=False,sort_keys=True)+'\n' for x in manifest)); (out/'ANOMALIES.jsonl').write_text(''.join(json.dumps(x,ensure_ascii=False,sort_keys=True)+'\n' for x in anomalies)); (out/'SUMMARY.json').write_text(json.dumps(summary,ensure_ascii=False,sort_keys=True,indent=2)+'\n'); (out/'SHA256SUMS.txt').write_text(''.join(f'{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.relative_to(out)}\n' for p in sorted((out/'raw').rglob('*.json'))))
+          print(json.dumps(summary,ensure_ascii=False))
+          if anomalies: sys.exit(2)
+          PY
+      - name: Upload recovered range
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: p2c-valuation-recovery-${{ matrix.tag }}-v3
+          path: out_p2c_recovery_*/
+          if-no-files-found: error
+          retention-days: 7
+
+  repair_prior_anomalies:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Repair only known v2b anomaly dates
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import subprocess,pathlib,hashlib,json,datetime,time,sys
+          dates='20160324 20160530 20160728 20160801 20160804 20160815 20160825 20161001 20161015 20170117 20170121 20170127 20170129 20170804 20170807 20170810 20170815 20170821 20170825 20170830 20180302 20180317 20180430'.split()
+          out=pathlib.Path('out_p2c_repair'); tp=out/'raw'/'TPEX_PERATIO'; tp.mkdir(parents=True); UA='Mozilla/5.0 P2-C-PIT-Recovery/3.0'; manifest=[]; anomalies=[]
+          for ymd in dates:
+            d=datetime.datetime.strptime(ymd,'%Y%m%d').date(); roc=f'{d.year-1911:03d}/{d.month:02d}/{d.day:02d}'; url=f'https://www.tpex.org.tw/web/stock/aftertrading/peratio_analysis/pera_result.php?l=zh-tw&o=json&d={roc}&c='; dest=tp/f'{ymd}.json'; hdr=dest.with_suffix('.headers.txt')
+            cmd=['curl','-k','-L','--silent','--show-error','--retry','8','--retry-all-errors','--retry-delay','2','--connect-timeout','15','--max-time','120','-A',UA,'-H','Accept: */*','-H','Accept-Encoding: identity','-D',str(hdr),'-o',str(dest),'-w','%{http_code}\t%{url_effective}',url]
+            p=subprocess.run(cmd,capture_output=True,text=True); info=(p.stdout or '').strip().split('\t',1); status=int(info[0]) if info and info[0].isdigit() else None; body=dest.read_bytes() if dest.exists() else b''
+            kind='UNPARSED'; rows=None; internal=None; stat=None; fields=None
+            try:
+              j=json.loads(body.decode('utf-8-sig')); stat=j.get('stat'); internal=j.get('date'); tabs=j.get('tables')
+              if isinstance(tabs,list) and tabs:
+                t=tabs[0]; fields=t.get('fields'); rows=t.get('totalCount'); rows=len(t.get('data',[])) if rows is None and isinstance(t.get('data'),list) else rows
+              else: rows=0
+              kind='DATA' if stat=='ok' and isinstance(rows,int) and rows>0 else ('NO_DATA' if stat=='ok' and rows==0 else 'OTHER')
+            except Exception: pass
+            m={'capture':'REPAIR_V3','source':'TPEX_PERATIO','date':ymd,'url':url,'status':status,'curl_rc':p.returncode,'bytes':len(body),'sha256':hashlib.sha256(body).hexdigest(),'kind':kind,'rows':rows,'internal_date':internal,'fields':fields,'stat':stat}; manifest.append(m)
+            if status!=200 or p.returncode!=0 or kind not in ('DATA','NO_DATA') or (kind=='DATA' and internal!=ymd): anomalies.append(m)
+            time.sleep(0.2)
+          (out/'MANIFEST.jsonl').write_text(''.join(json.dumps(x,ensure_ascii=False,sort_keys=True)+'\n' for x in manifest)); (out/'ANOMALIES.jsonl').write_text(''.join(json.dumps(x,ensure_ascii=False,sort_keys=True)+'\n' for x in anomalies)); (out/'SUMMARY.json').write_text(json.dumps({'dates':len(dates),'anomaly_count':len(anomalies)},indent=2)+'\n')
+          if anomalies: sys.exit(2)
+          PY
+      - name: Upload repair
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: p2c-valuation-repair-v3
+          path: out_p2c_repair/
+          if-no-files-found: error
+          retention-days: 7
+
+  consolidate:
+    needs: [recover_ranges, repair_prior_anomalies]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Download prior v2b 2016-2018 artifacts
+        uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: 34687211836
+          pattern: p2c-valuation-month-201*-v2
+          path: prior
+          merge-multiple: true
+      - name: Download current recovery artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: p2c-valuation-recovery-*-v3
+          path: recovery
+          merge-multiple: true
+      - name: Download repair artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: p2c-valuation-repair-v3
+          path: repair
+      - name: Build canonical PIT matrix and validate exact daily coverage
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import pathlib,json,hashlib,datetime,csv,gzip,shutil,sys
+          out=pathlib.Path('P2C_VALUATION_PIT_2012_2021_V1'); raw=out/'raw'; (raw/'TWSE_BWIBBU').mkdir(parents=True); (raw/'TPEX_PERATIO').mkdir(parents=True)
+          lineage={}; copy_count=0
+          def overlay(root,label,allow_years=None):
+            global copy_count
+            root=pathlib.Path(root)
+            if not root.exists(): return
+            for src in ('TWSE_BWIBBU','TPEX_PERATIO'):
+              for p in root.rglob(f'raw/{src}/*.json'):
+                ymd=p.stem
+                if len(ymd)!=8 or not ymd.isdigit(): continue
+                y=int(ymd[:4])
+                if allow_years is not None and y not in allow_years: continue
+                dest=raw/src/f'{ymd}.json'; shutil.copyfile(p,dest); lineage[(src,ymd)]=label; copy_count+=1
+          overlay('prior','GHA_RUN_34687211836_V2B',{2016,2017,2018})
+          overlay('recovery','GHA_CURRENT_RECOVERY_V3')
+          overlay('repair','GHA_CURRENT_REPAIR_V3')
+
+          def classify(src,b):
+            try: j=json.loads(b.decode('utf-8-sig'))
+            except Exception as e: return {'kind':'UNPARSED','error':f'{type(e).__name__}:{e}'}
+            if src=='TWSE_BWIBBU':
+              data=j.get('data'); rows=len(data) if isinstance(data,list) else 0; kind='DATA' if j.get('stat')=='OK' and rows>0 else ('NO_DATA' if j.get('stat')=='OK' and rows==0 else 'OTHER'); return {'kind':kind,'rows':rows,'internal_date':j.get('date'),'fields':j.get('fields'),'payload':j}
+            tabs=j.get('tables'); t=tabs[0] if isinstance(tabs,list) and tabs else {}; data=t.get('data'); rows=t.get('totalCount'); rows=len(data) if rows is None and isinstance(data,list) else (rows or 0); kind='DATA' if j.get('stat')=='ok' and rows>0 else ('NO_DATA' if j.get('stat')=='ok' and rows==0 else 'OTHER'); return {'kind':kind,'rows':rows,'internal_date':j.get('date'),'fields':t.get('fields'),'payload':j}
+
+          start=datetime.date(2012,1,1); end=datetime.date(2021,12,31); d=start; daily=[]; errors=[]
+          while d<=end:
+            ymd=d.strftime('%Y%m%d')
+            for src in ('TWSE_BWIBBU','TPEX_PERATIO'):
+              p=raw/src/f'{ymd}.json'
+              if not p.exists(): errors.append({'type':'MISSING_RAW','source':src,'date':ymd}); continue
+              b=p.read_bytes(); c=classify(src,b); rec={'source':src,'date':ymd,'path':str(p.relative_to(out)),'bytes':len(b),'sha256':hashlib.sha256(b).hexdigest(),'lineage':lineage.get((src,ymd),'UNKNOWN'),'kind':c.get('kind'),'rows':c.get('rows'),'internal_date':c.get('internal_date'),'fields':c.get('fields')}; daily.append(rec)
+              if c.get('kind') not in ('DATA','NO_DATA'): errors.append({'type':'BAD_PARSE','source':src,'date':ymd,'kind':c.get('kind')})
+              if c.get('kind')=='DATA' and c.get('internal_date')!=ymd: errors.append({'type':'DATE_MISMATCH','source':src,'date':ymd,'internal':c.get('internal_date')})
+            d+=datetime.timedelta(days=1)
+
+          def num(x):
+            if x is None: return ''
+            s=str(x).strip().replace(',','')
+            if s in ('','N/A','--','-','－'): return ''
+            try: return repr(float(s))
+            except: return ''
+          matrix=out/'P2C_VALUATION_PIT_2012_2021.csv.gz'; row_count=0; data_days={'TWSE_BWIBBU':0,'TPEX_PERATIO':0}
+          with gzip.open(matrix,'wt',encoding='utf-8',newline='') as gz:
+            w=csv.writer(gz); w.writerow(['source','source_date','available_from_date','security_code','security_name','pe','pb','dividend_yield_pct','close_price','dividend_per_share','dividend_year','financial_period','capture_lineage'])
+            for rec in sorted(daily,key=lambda x:(x['date'],x['source'])):
+              if rec['kind']!='DATA': continue
+              data_days[rec['source']]+=1; p=out/rec['path']; j=json.loads(p.read_text(encoding='utf-8-sig')); src=rec['source']; source_date=datetime.datetime.strptime(rec['date'],'%Y%m%d').date(); avail=(source_date+datetime.timedelta(days=1)).isoformat()
+              if src=='TWSE_BWIBBU': fields=j['fields']; rows=j['data']
+              else: t=j['tables'][0]; fields=t['fields']; rows=t['data']
+              idx={str(k).strip():i for i,k in enumerate(fields)}
+              def val(r,*names):
+                for n in names:
+                  if n in idx and idx[n]<len(r): return r[idx[n]]
+                return None
+              for r in rows:
+                if src=='TWSE_BWIBBU': code=val(r,'證券代號','股票代號'); name=val(r,'證券名稱','公司名稱')
+                else: code=val(r,'股票代號','證券代號'); name=val(r,'公司名稱','證券名稱')
+                if code is None: errors.append({'type':'ROW_NO_CODE','source':src,'date':rec['date']}); continue
+                w.writerow([src,source_date.isoformat(),avail,str(code).strip(),str(name or '').strip(),num(val(r,'本益比')),num(val(r,'股價淨值比')),num(val(r,'殖利率(%)')),num(val(r,'收盤價')),num(val(r,'每股股利')),str(val(r,'股利年度') or '').strip(),str(val(r,'財報年/季') or '').strip(),rec['lineage']]); row_count+=1
+
+          pit={'version':'P2C_VALUATION_PIT_V1','scope':'2012-01-01..2021-12-31','features':['PE','PB','DIVIDEND_YIELD_PCT'],'published_semantics':'Official daily valuation report for source date D uses D closing price / daily state. Exact publication timestamp is not assumed.','conservative_available_rule':'Rows with source_date D are forbidden for same-date model use and become available_from_date D+1 calendar day. Downstream PIT join must require source_date < model_trade_date.','same_day_use':'FORBIDDEN','missingness':'No zero fill, no synthetic backfill; NO_DATA produces no security rows.','derived_features':'NONE_IN_THIS_MATRIX','security_identity':'Source security code/name retained; downstream canonical identity must use PIT Security Master.'}
+          (out/'PIT_CONTRACT.json').write_text(json.dumps(pit,ensure_ascii=False,sort_keys=True,indent=2)+'\n'); (out/'SOURCE_DAILY_MANIFEST.jsonl').write_text(''.join(json.dumps(x,ensure_ascii=False,sort_keys=True)+'\n' for x in daily))
+          summary={'status':'PASS' if not errors else 'FAIL','scope':pit['scope'],'calendar_days':(end-start).days+1,'expected_raw_files':2*((end-start).days+1),'manifest_records':len(daily),'normalized_rows':row_count,'data_days':data_days,'errors':errors[:200],'error_count':len(errors),'lineage_counts':{}}
+          for r in daily: summary['lineage_counts'][r['lineage']]=summary['lineage_counts'].get(r['lineage'],0)+1
+          (out/'SUMMARY.json').write_text(json.dumps(summary,ensure_ascii=False,sort_keys=True,indent=2)+'\n'); files=[p for p in out.rglob('*') if p.is_file() and p.name!='SHA256SUMS.txt']; (out/'SHA256SUMS.txt').write_text(''.join(f'{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.relative_to(out)}\n' for p in sorted(files)))
+          print(json.dumps(summary,ensure_ascii=False,indent=2))
+          if errors: sys.exit(2)
+          PY
+      - name: Upload canonical 2012-2021 PIT matrix
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: P2C_VALUATION_PIT_2012_2021_V1
+          path: P2C_VALUATION_PIT_2012_2021_V1/
+          if-no-files-found: error
+          retention-days: 7
