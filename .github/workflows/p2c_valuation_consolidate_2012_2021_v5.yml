@@ -38,10 +38,10 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p inputs/v4 inputs/v2b inputs/repair inputs/alt4
-          gh run download "$V4_RUN" -p 'p2c-valuation-month-*-v4' -D inputs/v4
-          gh run download "$V2B_RUN" -p 'p2c-valuation-month-*-v2' -D inputs/v2b
-          gh run download "$REPAIR_RUN" -n 'p2c-valuation-repair-v3' -D inputs/repair
-          gh run download "$ALT4_RUN" -n 'p2c-tpex-4date-alt-transport-probe-v1' -D inputs/alt4
+          gh run download "$V4_RUN" -R "${{ github.repository }}" -p 'p2c-valuation-month-*-v4' -D inputs/v4
+          gh run download "$V2B_RUN" -R "${{ github.repository }}" -p 'p2c-valuation-month-*-v2' -D inputs/v2b
+          gh run download "$REPAIR_RUN" -R "${{ github.repository }}" -n 'p2c-valuation-repair-v3' -D inputs/repair
+          gh run download "$ALT4_RUN" -R "${{ github.repository }}" -n 'p2c-tpex-4date-alt-transport-probe-v1' -D inputs/alt4
       - name: Build and independently validate PIT matrix
         shell: bash
         run: |
