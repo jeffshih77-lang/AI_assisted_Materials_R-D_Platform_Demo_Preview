@@ -1,0 +1,22 @@
+name: Market Downloader OpenAPI Date Capability
+on:
+  push:
+    branches: [market-downloader-ci-v015]
+    paths:
+      - 'market_downloader_ci/openapi_date_param_probe.py'
+      - '.github/workflows/market-downloader-openapi-date-probe.yml'
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Official OpenAPI selected-date capability probe
+        env:
+          PYTHONUTF8: '1'
+        run: python market_downloader_ci/openapi_date_param_probe.py
