@@ -1,7 +1,7 @@
-name: RAW W01 TWSE targeted gap7 20260819-20260903
+name: RAW W01 TWSE adjacent9 reconstructed-to-RAW 20260814-20260904
 on:
   push:
-    branches: [raw-w01-gap7-20260918]
+    branches: [raw-w01-adjacent9-20260918]
     paths:
       - 'raw_w01_incremental/**'
       - '.github/workflows/raw-w01-incremental-20260918.yml'
@@ -9,7 +9,7 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: raw-w01-gap7-20260918
+  group: raw-w01-adjacent9-20260918
   cancel-in-progress: false
 jobs:
   collect:
@@ -19,14 +19,14 @@ jobs:
       - uses: actions/checkout@v4
       - name: Compile collector and governance finalizer
         run: python -m py_compile raw_w01_incremental/collector.py raw_w01_incremental/finalize_governance.py
-      - name: Collect seven exact official TWSE RAW gaps
+      - name: Collect nine exact official TWSE RAW replacements
         run: >-
           python raw_w01_incremental/collector.py
           --work-units raw_w01_incremental/work_units.csv
           --output-root raw_w01_incremental/out
           --phase HISTORICAL
           --package
-      - name: Create targeted gap manifest receipt PIT lineage and coverage delta
+      - name: Create adjacent9 correction manifest receipt PIT lineage and coverage delta
         run: python raw_w01_incremental/finalize_governance.py raw_w01_incremental/out
       - name: Verify archive and governance files
         shell: bash
@@ -42,10 +42,10 @@ jobs:
               json.loads(f.read_text(encoding='utf-8'))
               print('OK', f.name)
           PY
-      - name: Upload targeted immutable RAW gap artifact
+      - name: Upload adjacent9 immutable RAW correction artifact
         uses: actions/upload-artifact@v4
         with:
-          name: RAW-W01_TWSE_DAILY_K_TARGETED_GAP7_20260819_20260903
+          name: RAW-W01_TWSE_DAILY_K_ADJACENT9_FORMAL_RAW_20260814_20260904
           path: |
             raw_w01_incremental/out/packages/*.zip
             raw_w01_incremental/out/manifest/*.json
