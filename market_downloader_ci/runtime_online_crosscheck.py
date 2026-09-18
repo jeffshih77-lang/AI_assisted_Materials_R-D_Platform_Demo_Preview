@@ -67,7 +67,15 @@ def main():
             row=html_row_2330(text); r["row2330"]=row; exp=EXP[name]; r["exact_sha_match"]=sha==exp["sha"]; r["row_match"]=row==exp["row"]
             r["ok"]=r["exact_sha_match"] or r["row_match"]
         elif name=="TAIEX_DAILY":
-            arr=json.loads(text); found=next((x for x in arr if x.get("Date")=="1150916"),None); r["row"]=found; r["ok"]=found==EXP[name]["row"]
+            try:
+                arr=json.loads(text)
+                found=next((x for x in arr if isinstance(x,dict) and x.get("Date")=="1150916"),None)
+                r["row"]=found
+                r["ok"]=found==EXP[name]["row"]
+            except Exception as e:
+                r["ok"]=False
+                r["parse_error"]=f"{type(e).__name__}:{e}"
+                r["preview"]=text[:160]
         elif name=="ECB":
             r["ok"]=EXP[name]["needle"] in text
         elif name=="UST":
@@ -76,6 +84,7 @@ def main():
         elif name=="VIX":
             r["ok"]=EXP[name]["needle"] in text
         results[name]=r
+        print(json.dumps({"dataset":name,**r},ensure_ascii=False),flush=True)
         if not r["ok"]: fail.append(name)
     # Empty foreign hold is treated as independent anomaly even if source reproduces it.
     if results.get("TWSE_FOREIGN_HOLD",{}).get("empty_anomaly"):
