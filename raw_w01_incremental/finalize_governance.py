@@ -25,7 +25,7 @@ fetch_times=[done[d]["retrieved_at"] for d in member_dates]
 rows=sum(int(m["rows"]) for m in meta["members"])
 start,end=member_dates[0],member_dates[-1]
 start8,end8=start.replace("-",""),end.replace("-","")
-package_id=f"RAW-W01-TWSE-DK-GAP7-{start8}-{end8}-{package_sha[:12]}"
+package_id=f"RAW-W01-TWSE-DK-ADJ9-{start8}-{end8}-{package_sha[:12]}"
 created=datetime.now(timezone.utc).isoformat(timespec="seconds")
 per_member=[]
 for m in meta["members"]:
@@ -64,17 +64,17 @@ receipt={
   "pit_lineage":{"source_trade_date_field":"TWSE payload date","market_timezone":"Asia/Taipei","retrieved_at_preserved":True,
                  "available_at":None,"available_at_status":"UNKNOWN_RAW_LAYER__DO_NOT_GUESS__DERIVE_CONSERVATIVELY_DOWNSTREAM",
                  "identity_mapping_status":"NOT_APPLIED_RAW_LAYER"},
-  "correction_type":"TARGETED_FORMAL_RAW_GAP_FILL","target_gap_dates":member_dates,
+  "correction_type":"REPLACE_RECONSTRUCTED_WITH_FORMAL_OFFICIAL_RAW","target_gap_dates":member_dates,
   "non_contiguous_target_set":True,
   "package_name":pkg.name,"package_bytes":len(package_bytes),"package_sha256":package_sha,
   "members":per_member,"created_at":created
 }
 coverage={
   "coverage_schema_version":"raw_coverage_gap_delta_v1","package_id":package_id,
-  "dataset_id":"TWSE_DAILY_K","market":"TWSE","correction_type":"TARGETED_GAP_FILL",
+  "dataset_id":"TWSE_DAILY_K","market":"TWSE","correction_type":"REPLACE_RECONSTRUCTED_WITH_FORMAL_RAW",
   "target_gap_dates":member_dates,"completed_units":len(member_dates),"failed_units":0,
   "status":"GITHUB_LOCAL_VERIFIED_PENDING_DRIVE_CLOUD_VERIFIED","cloud_authority":False,
-  "note":"This package fills only the listed missing physical RAW units; start/end do not imply every trading date in the span is contained.",
+  "note":"This package replaces only the listed reconstructed-only units with formal official RAW; start/end do not imply every trading date in the span is contained.",
   "rule":"Do not mark formal gap closure until package + sidecars are uploaded and Drive readback verifies bytes/SHA."
 }
 names=[
