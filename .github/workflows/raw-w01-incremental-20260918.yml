@@ -1,0 +1,53 @@
+name: RAW W01 TWSE incremental 20260907-20260917
+on:
+  push:
+    branches: [raw-w01-incremental-20260918]
+    paths:
+      - 'raw_w01_incremental/**'
+      - '.github/workflows/raw-w01-incremental-20260918.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: raw-w01-incremental-20260918
+  cancel-in-progress: false
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile collector and governance finalizer
+        run: python -m py_compile raw_w01_incremental/collector.py raw_w01_incremental/finalize_governance.py
+      - name: Collect exact official TWSE RAW
+        run: >-
+          python raw_w01_incremental/collector.py
+          --work-units raw_w01_incremental/work_units.csv
+          --output-root raw_w01_incremental/out
+          --phase HISTORICAL
+          --package
+      - name: Create manifest receipt PIT-lineage and coverage delta
+        run: python raw_w01_incremental/finalize_governance.py raw_w01_incremental/out
+      - name: Verify package archive and governance files
+        shell: bash
+        run: |
+          set -euo pipefail
+          unzip -t raw_w01_incremental/out/packages/*.zip
+          python - <<'PY'
+          import json, pathlib
+          p=pathlib.Path('raw_w01_incremental/out/manifest')
+          for f in sorted(p.glob('RAW-W01_TWSE_DAILY_K_*.json')):
+              json.loads(f.read_text(encoding='utf-8'))
+              print('OK', f.name)
+          PY
+      - name: Upload immutable RAW correction artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: RAW-W01_TWSE_DAILY_K_INCREMENTAL_20260907_20260917
+          path: |
+            raw_w01_incremental/out/packages/*.zip
+            raw_w01_incremental/out/manifest/*.json
+            raw_w01_incremental/out/manifest/*.jsonl
+            raw_w01_incremental/out/manifest/*.csv
+          if-no-files-found: error
+          retention-days: 7
