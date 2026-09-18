@@ -71,8 +71,15 @@ def fetch_once(url, timeout=35):
 
 def fetch(ds,url):
     if ds!="TPEX_DAILY_K":
-        ok,status,n,text=fetch_once(url,35)
-        return ok,status,n,text,1
+        last=(False,"UNKNOWN",0,"",0)
+        for attempt in range(1,4):
+            ok,status,n,text=fetch_once(url,35)
+            last=(ok,status,n,text,attempt)
+            if ok: return last
+            recoverable=str(status).startswith("NETWORK_ERROR") or str(status).startswith("INCOMPLETE_READ") or re.match(r"^HTTP_[5][0-9][0-9]",str(status))
+            if not recoverable or attempt>=3: return last
+            time.sleep(2)
+        return last
     backoff=(2,8,20,45)
     last=(False,"UNKNOWN",0,"",0)
     for attempt in range(1,6):
