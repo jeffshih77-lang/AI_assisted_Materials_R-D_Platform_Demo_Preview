@@ -3,6 +3,7 @@ import csv, hashlib, io, json, re, urllib.request
 from datetime import date
 UA='MarketDataDownloader-RT10-Verify/1.0 (official endpoints only; no bypass)'
 TARGET='2026-09-16'
+EXPECTED_SEMANTIC={'TWSE_INSTITUTIONAL_ORDER':'4102a91d3406f9c3858663f6dab122936066d179422fab335aac02f202cc723e','TWSE_INSTITUTIONAL_SORTED':'cf9c6b88685d8752cb1f9e4deecd19f93becebac530a52358027bb06747a9594'}
 EXPECTED={
 'TWSE_DAILY_K':'b41fcec43166ee6702d7130237ba11c75347bd75fc922986115f16c004550ae5',
 'TWSE_INSTITUTIONAL':'6c1fe3837a9a95da250af902561f52a966f92fe1b3fa687dd85334d8dbb868e9',
@@ -49,6 +50,13 @@ def main():
             elif name=='TWSE_INSTITUTIONAL':
                 row['date_header_ok']='115年09月16日' in text
                 row['friend_2409'] = next((x for x in text.splitlines() if x.startswith('"2409"')),None)
+                lines=[x.rstrip() for x in text.replace('\\r\\n','\\n').replace('\\r','\\n').split('\\n')]
+                oh=hashlib.sha256('\\n'.join(lines).encode('utf-8')).hexdigest()
+                sh=hashlib.sha256('\\n'.join(sorted(lines)).encode('utf-8')).hexdigest()
+                row['normalized_order_sha']=oh
+                row['normalized_sorted_sha']=sh
+                row['normalized_order_matches_runtime10']=oh==EXPECTED_SEMANTIC['TWSE_INSTITUTIONAL_ORDER']
+                row['normalized_sorted_matches_runtime10']=sh==EXPECTED_SEMANTIC['TWSE_INSTITUTIONAL_SORTED']
             elif name.startswith('TWSE_FOREIGN_HOLD'):
                 obj=json.loads(text); row['stat']=obj.get('stat'); row['date']=obj.get('date'); row['total']=obj.get('total'); row['data_len']=len(obj.get('data') or [])
                 row['first_row']=(obj.get('data') or [None])[0]
