@@ -7,7 +7,7 @@ permissions:
 jobs:
   qualification:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 12
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -15,7 +15,11 @@ jobs:
           python-version: '3.12'
       - name: Six requested scenarios
         run: python -m unittest market_downloader_ci/test_scenarios.py -v
-      - name: Official source live contract probe
+      - name: Changed-source contract probe
         env:
           PYTHONUTF8: '1'
         run: python market_downloader_ci/contract_probe.py
+      - name: Full 18-line official open-data live gate
+        env:
+          PYTHONUTF8: '1'
+        run: python market_downloader_ci/full_line_open_data_probe.py
