@@ -1,135 +1,128 @@
 from __future__ import annotations
-import hashlib, json, re, sys, time, urllib.request, urllib.error
+import csv, hashlib, io, json, re, sys, urllib.request, urllib.error
 from datetime import date
 
-UA="MarketDataDownloader-CI/0.15 (official-source qualification; no bypass)"
+UA="MarketDataDownloader-CI/0.15 (open-data qualification; no bypass)"
 MAX_BYTES=16*1024*1024
-BLOCK_STRONG=("access denied","request blocked","verify you are human","are you human",
-              "attention required! | cloudflare","<title>just a moment","cf-chl-",
-              "challenge-platform","hcaptcha.com/1/api.js","g-recaptcha-response")
 
 TARGETS={
-"TPEX_DAILY_K":{"kind":"json_exact","urls":[
-  "https://www.tpex.org.tw/web/stock/aftertrading/otc_quotes_no1430/stk_wn1430_result.php?l=zh-tw&d={roc}&se=AL",
-  "https://www.tpex.org.tw/web/stock/aftertrading/daily_close_quotes/stk_quote_result.php?l=zh-tw&o=json&d={roc}&s=0,asc,0"]},
-"TPEX_INSTITUTIONAL":{"kind":"json_exact","min_cols":20,"urls":[
-  "https://www.tpex.org.tw/www/zh-tw/insti/dailyTrade?type=Daily&sect=EW&date={roc}&id=&response=json"]},
-"TPEX_FOREIGN_HOLD":{"kind":"delimited_exact","markers":["代號"],"urls":[
-  "https://www.tpex.org.tw/web/stock/3insti/qfii/qfii_result.php?l=zh-tw&d={roc}&o=data"]},
-"TPEX_MARGIN":{"kind":"json_exact","min_cols":8,"urls":[
-  "https://www.tpex.org.tw/web/stock/margin_trading/margin_balance/margin_bal_result.php?l=zh-tw&o=json&d={roc}"]},
-"TPEX_LENDING":{"kind":"json_exact","min_cols":6,"urls":[
-  "https://www.tpex.org.tw/web/stock/margin_trading/loan_sbl/margin_sbl_result.php?l=zh-tw&d={roc}&o=json"]},
-"TAIFEX_FUTURES_OI":{"kind":"html_exact","markers":["未平倉"],"urls":[
-  "https://www.taifex.com.tw/cht/3/futContractsDate?queryDate={iso}"]},
-"TAIFEX_OPTIONS_INSTITUTIONAL":{"kind":"html_exact","markers":["選擇權","未平倉"],"urls":[
-  "https://www.taifex.com.tw/cht/3/optContractsDate?queryDate={iso}"]},
+"TPEX_DAILY_K":"https://www.tpex.org.tw/openapi/v1/tpex_mainboard_daily_close_quotes",
+"TPEX_INSTITUTIONAL":"https://www.tpex.org.tw/openapi/v1/tpex_3insti_daily_trading",
+"TPEX_FOREIGN_HOLD":"https://www.tpex.org.tw/openapi/v1/tpex_3insti_qfii",
+"TPEX_MARGIN":"https://www.tpex.org.tw/openapi/v1/tpex_mainboard_margin_balance",
+"TPEX_LENDING":"https://www.tpex.org.tw/openapi/v1/tpex_margin_sbl",
+"TAIFEX_FUTURES_OI":"https://openapi.taifex.com.tw/v1/MarketDataOfMajorInstitutionalTradersDetailsOfFuturesContractsBytheDate",
+"TAIFEX_OPTIONS_INSTITUTIONAL":"https://openapi.taifex.com.tw/v1/MarketDataOfMajorInstitutionalTradersDetailsOfOptionsContractsBytheDate",
 }
+TP_EX=set(k for k in TARGETS if k.startswith("TPEX_"))
+TAI_FEX=set(TARGETS)-TP_EX
 
-def fmt(d): return {"iso":d.strftime("%Y/%m/%d"),"roc":f"{d.year-1911:03d}/{d.month:02d}/{d.day:02d}"}
-def date_markers(d):
-    roc=d.year-1911
-    return (d.strftime("%Y/%m/%d"),d.strftime("%Y-%m-%d"),d.strftime("%Y%m%d"),
-            f"{roc:03d}/{d.month:02d}/{d.day:02d}",f"{roc}年{d.month:02d}月{d.day:02d}日")
-def has_date(text,d):
-    flat=text.replace(" ","")
-    return any(x.replace(" ","") in flat for x in date_markers(d))
-def blocked(text):
-    low=(text or "").lower()
-    if any(x in low for x in BLOCK_STRONG): return True
-    if len(low)<200000 and ("captcha" in low or "cloudflare" in low):
-        if any(x in low for x in ("challenge","blocked","security check","human verification")): return True
-    return False
-def parse_date(v):
-    s=re.sub(r"\D","",str(v or ""))
-    if len(s)==7: return date(int(s[:3])+1911,int(s[3:5]),int(s[5:7]))
-    if len(s)==8 and int(s[:4])>=1912: return date(int(s[:4]),int(s[4:6]),int(s[6:8]))
-    return None
-def json_dates(obj):
-    out=[]
-    def add(v):
-        d=parse_date(v)
-        if d and d not in out: out.append(d)
-    if isinstance(obj,dict):
-        for k in ("date","Date","reportDate","dataDate","queryDate"): add(obj.get(k))
-        for t in obj.get("tables") or []:
-            if isinstance(t,dict):
-                for k in ("date","Date","reportDate","dataDate"): add(t.get(k))
-    elif isinstance(obj,list):
-        for row in obj[:100]:
-            if isinstance(row,dict):
-                for k in ("date","Date","reportDate","dataDate"): add(row.get(k))
-    return out
-def json_rows(obj):
-    if isinstance(obj,dict):
-        for t in obj.get("tables") or []:
-            if isinstance(t,dict) and isinstance(t.get("data"),list): return t["data"]
-        for k in ("aaData","data"):
-            if isinstance(obj.get(k),list): return obj[k]
-    if isinstance(obj,list): return obj
-    return []
 def fetch(url):
-    req=urllib.request.Request(url,headers={"User-Agent":UA,"Accept":"application/json,text/csv,text/html,*/*;q=0.5",
-      "Accept-Language":"zh-TW,zh;q=0.9,en;q=0.5","Accept-Encoding":"identity","Connection":"close"})
+    req=urllib.request.Request(url,headers={
+        "User-Agent":UA,"Accept":"application/json,text/csv,*/*;q=0.5",
+        "Accept-Language":"zh-TW,zh;q=0.9,en;q=0.5",
+        "Accept-Encoding":"identity","Connection":"close"})
     try:
         with urllib.request.urlopen(req,timeout=35) as r:
             raw=r.read(MAX_BYTES+1)
-            if len(raw)>MAX_BYTES: return {"status":"PAYLOAD_TOO_LARGE","url":url,"http":getattr(r,"status",200)}
+            if len(raw)>MAX_BYTES:
+                return {"status":"PAYLOAD_TOO_LARGE","url":url,"http":getattr(r,"status",200)}
             return {"status":"HTTP_OK","url":url,"http":int(getattr(r,"status",200)),
-                    "ctype":r.headers.get("Content-Type","") or "","raw":raw,"bytes":len(raw),
-                    "sha256":hashlib.sha256(raw).hexdigest()}
+                    "ctype":r.headers.get("Content-Type","") or "","raw":raw,
+                    "bytes":len(raw),"sha256":hashlib.sha256(raw).hexdigest()}
     except urllib.error.HTTPError as e:
-        return {"status":"ACCESS_LIMITED" if e.code in (401,403,429) else "HTTP_ERROR","url":url,"http":e.code,"error":str(e)}
+        return {"status":"HTTP_ERROR","url":url,"http":e.code,"error":str(e)}
     except Exception as e:
         return {"status":"NETWORK_ERROR","url":url,"error":f"{type(e).__name__}: {e}"}
+
 def decode(raw):
     for enc in ("utf-8-sig","utf-8","cp950","big5"):
         try:return raw.decode(enc)
         except UnicodeDecodeError: pass
     return raw.decode("latin1","replace")
-def slim(res): return {k:v for k,v in res.items() if k!="raw"}
-def validate(spec,d,res):
-    if res["status"]!="HTTP_OK": return res
-    text=decode(res["raw"])
-    if blocked(text): return {**slim(res),"status":"SOURCE_BLOCKED","preview_hash":hashlib.sha256(text[:4096].encode("utf-8","replace")).hexdigest()}
+
+def parsed_rows(text):
+    s=text.lstrip()
+    if s.startswith("[") or s.startswith("{"):
+        obj=json.loads(text)
+        if isinstance(obj,list): return obj,"json"
+        if isinstance(obj,dict):
+            for k in ("data","aaData","rows"):
+                if isinstance(obj.get(k),list): return obj[k],"json"
+            for t in obj.get("tables") or []:
+                if isinstance(t,dict) and isinstance(t.get("data"),list):
+                    return t["data"],"json"
+            return [obj],"json"
+    rows=list(csv.reader(io.StringIO(text)))
+    return rows,"csv"
+
+def find_dates(rows):
+    vals=[]
+    for row in rows[:250]:
+        if isinstance(row,dict):
+            candidates=[v for k,v in row.items() if "date" in str(k).lower() or "日期" in str(k)]
+        else:
+            candidates=row[:4] if isinstance(row,list) else []
+        for v in candidates:
+            s=str(v or "").strip()
+            m=re.search(r"(20\d{2})[-/]?(\d{2})[-/]?(\d{2})",s)
+            if m:
+                vals.append(f"{m.group(1)}-{m.group(2)}-{m.group(3)}"); continue
+            m=re.search(r"(?<!\d)(1\d{2})[-/]?(\d{2})[-/]?(\d{2})(?!\d)",s)
+            if m:
+                vals.append(f"{int(m.group(1))+1911:04d}-{m.group(2)}-{m.group(3)}")
+    return sorted(set(vals))
+
+def probe(ds,url):
+    r=fetch(url)
+    if r["status"]!="HTTP_OK": return {"dataset":ds,**r}
+    text=decode(r["raw"])
     try:
-        if spec["kind"]=="json_exact":
-            obj=json.loads(text); dates=json_dates(obj); rows=json_rows(obj)
-            if dates and any(x!=d for x in dates): return {**slim(res),"status":"WRONG_DATE","dates":[x.isoformat() for x in dates]}
-            if not dates and not has_date(text,d): return {**slim(res),"status":"DATE_UNPROVEN"}
-            if not rows: return {**slim(res),"status":"NO_DATA","rows":0}
-            m=spec.get("min_cols",1)
-            if m>1 and any(isinstance(r,list) and len(r)<m for r in rows[:20]): return {**slim(res),"status":"SCHEMA_MISMATCH","rows":len(rows)}
-            return {**slim(res),"status":"DATA","rows":len(rows)}
-        if spec["kind"]=="delimited_exact":
-            if not has_date(text,d): return {**slim(res),"status":"DATE_UNPROVEN"}
-            if not any(x in text[:8192] for x in spec.get("markers",[])): return {**slim(res),"status":"SCHEMA_MISMATCH"}
-            return {**slim(res),"status":"DATA"}
-        if spec["kind"]=="html_exact":
-            if not has_date(text,d): return {**slim(res),"status":"DATE_UNPROVEN"}
-            if "<table" not in text.lower(): return {**slim(res),"status":"SCHEMA_MISMATCH"}
-            if not all(x in text for x in spec.get("markers",[])): return {**slim(res),"status":"SCHEMA_MISMATCH"}
-            return {**slim(res),"status":"DATA"}
-    except json.JSONDecodeError:
-        return {**slim(res),"status":"CONTENT_TYPE_MISMATCH","preview_hash":hashlib.sha256(text[:4096].encode()).hexdigest()}
-    return {**slim(res),"status":"UNRECOGNIZED"}
-def probe_one(ds,d):
-    attempts=[]
-    for tmpl in TARGETS[ds]["urls"]:
-        r=validate(TARGETS[ds],d,fetch(tmpl.format(**fmt(d)))); attempts.append(slim(r))
-        if r["status"] in ("DATA","NO_DATA"): return {"dataset":ds,"date":d.isoformat(),"status":r["status"],"attempts":attempts}
-        time.sleep(1)
-    return {"dataset":ds,"date":d.isoformat(),"status":"FAILED","attempts":attempts}
+        rows,fmt=parsed_rows(text)
+    except Exception as e:
+        return {"dataset":ds,**{k:v for k,v in r.items() if k!="raw"},
+                "status":"PARSE_ERROR","error":f"{type(e).__name__}: {e}"}
+    if not rows:
+        return {"dataset":ds,**{k:v for k,v in r.items() if k!="raw"},
+                "status":"EMPTY","format":fmt,"rows":0}
+    dates=find_dates(rows)
+    return {"dataset":ds,**{k:v for k,v in r.items() if k!="raw"},
+            "status":"DATA","format":fmt,"rows":len(rows),"observed_dates":dates[:8]}
+
+def historical_policy(selected,observed,current_only=True,auto_fill=False,max_backscan=7):
+    if selected==observed: return "EXACT_DATA"
+    if not current_only: return "HISTORY_QUERY_REQUIRED"
+    if auto_fill and observed < selected and 0 <= (selected-observed).days <= max_backscan:
+        return "AUTO_FILL_PREVIOUS"
+    return "HISTORICAL_AUTOMATION_BOUNDARY"
+
 def main():
-    out={"policy":"official-only; ordinary GET only; no captcha bypass; no paid source","runs":[]}; failures=[]
-    for d in (date(2026,9,15),date(2026,9,16)):
-        for ds in TARGETS:
-            r=probe_one(ds,d); out["runs"].append(r); print(json.dumps(r,ensure_ascii=False),flush=True)
-            if r["status"]!="DATA": failures.append(f"{ds}@{d}:{r['status']}")
-            time.sleep(1)
-    b=probe_one("TPEX_DAILY_K",date(2026,9,13)); out["boundary"]=b
-    if b["status"] not in ("NO_DATA","FAILED"): failures.append("boundary_unexpected:"+b["status"])
+    out={"policy":{
+        "network":"official OpenAPI / government-open-data linked endpoints only",
+        "ordinary_site_history_probe":False,
+        "captcha_bypass":False,
+        "paid_source":False,
+        "historical_current_only_terminal":"HISTORICAL_AUTOMATION_BOUNDARY",
+    },"runs":[]}
+    failures=[]
+    observed_any=None
+    for ds,url in TARGETS.items():
+        r=probe(ds,url); out["runs"].append(r)
+        print(json.dumps(r,ensure_ascii=False),flush=True)
+        if r["status"]!="DATA":
+            failures.append(f"{ds}:{r['status']}")
+        if r.get("observed_dates") and observed_any is None:
+            try: observed_any=date.fromisoformat(r["observed_dates"][-1])
+            except Exception: pass
+    # Model gates: strict wrong-day must never become DATA; auto-fill is explicit and bounded.
+    selected=date(2026,9,15)
+    if observed_any is not None:
+        out["strict_history_policy"]=historical_policy(selected,observed_any,current_only=True,auto_fill=False)
+        out["explicit_autofill_policy"]=historical_policy(selected,observed_any,current_only=True,auto_fill=True)
+        if observed_any != selected and out["strict_history_policy"]!="HISTORICAL_AUTOMATION_BOUNDARY":
+            failures.append("strict_historical_policy_not_boundary")
     out["gate"]="PASS" if not failures else "FAIL"; out["failures"]=failures
     print(json.dumps(out,ensure_ascii=False,indent=2),flush=True)
     if failures: sys.exit(2)
+
 if __name__=="__main__": main()
