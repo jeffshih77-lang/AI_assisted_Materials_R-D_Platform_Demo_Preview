@@ -1,0 +1,21 @@
+name: Market Downloader V15 Qualification
+on:
+  push:
+    branches: [market-downloader-ci-v015]
+permissions:
+  contents: read
+jobs:
+  qualification:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Six requested scenarios
+        run: python -m unittest market_downloader_ci/test_scenarios.py -v
+      - name: Official source live contract probe
+        env:
+          PYTHONUTF8: '1'
+        run: python market_downloader_ci/contract_probe.py
