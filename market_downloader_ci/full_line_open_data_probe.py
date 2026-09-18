@@ -1,5 +1,5 @@
 from __future__ import annotations
-import json, re, sys, time, urllib.request, urllib.error
+import http.client, json, re, sys, time, urllib.request, urllib.error
 from datetime import date
 
 UA="MarketDataDownloader-CI/0.15 (official open-data full-line qualification; no bypass)"
@@ -12,7 +12,6 @@ TARGETS={
  ("twse_company_basic","https://openapi.twse.com.tw/v1/opendata/t187ap03_L","json",["公司代號"],False),
  ("tpex_company_basic","https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap03_O","json",[],False)],
 "TAIEX_DAILY":[("twse_taiex_history","https://openapi.twse.com.tw/v1/indicesReport/MI_5MINS_HIST","json",[],True)],
-"TWSE_MARGIN":[("twse_margin","https://openapi.twse.com.tw/v1/exchangeReport/MI_MARGN","json",["Date"],False)],
 "TPEX_INSTITUTIONAL":[("tpex_inst","https://www.tpex.org.tw/openapi/v1/tpex_3insti_daily_trading","json",["Date"],False)],
 "TPEX_FOREIGN_HOLD":[("tpex_qfii","https://www.tpex.org.tw/openapi/v1/tpex_3insti_qfii","json",["Date"],False)],
 "TPEX_MARGIN":[("tpex_margin","https://www.tpex.org.tw/openapi/v1/tpex_mainboard_margin_balance","json",["Date"],False)],
@@ -41,17 +40,49 @@ TARGETS={
  ("cboe","https://cdn.cboe.com/api/global/us_indices/daily_prices/VIX_History.csv","csv",["DATE","OPEN","HIGH","LOW","CLOSE"],True)],
 "FINANCIAL_NEWS_EVENTS":[("fsc_rss","https://www.fsc.gov.tw/RSS/Messages?language=chinese&serno=201202290009","xml",["<item","<title"],False)]
 }
-BOUNDARIES=["TWSE_INSTITUTIONAL","TWSE_FOREIGN_HOLD","TWSE_LENDING","GLOBAL_INDICES_FUTURES"]
+BOUNDARIES=["TWSE_INSTITUTIONAL","TWSE_FOREIGN_HOLD","TWSE_MARGIN","TWSE_LENDING","GLOBAL_INDICES_FUTURES"]
 
-def fetch(url):
-    req=urllib.request.Request(url,headers={"User-Agent":UA,"Accept":"application/json,text/csv,application/xml,text/xml,*/*;q=0.5","Accept-Encoding":"identity","Connection":"close"})
+def fetch_once(url, timeout=35):
+    req=urllib.request.Request(url,headers={"User-Agent":UA,"Accept":"application/json,text/csv,application/xml,text/xml,*/*;q=0.5","Accept-Encoding":"identity","Connection":"close","Cache-Control":"no-cache","Pragma":"no-cache"})
     try:
-        with urllib.request.urlopen(req,timeout=35) as r:
-            raw=r.read(MAX_BYTES+1)
-            if len(raw)>MAX_BYTES: return False,"PAYLOAD_TOO_LARGE",0,""
+        with urllib.request.urlopen(req,timeout=timeout) as r:
+            expected=None
+            raw_len=r.headers.get("Content-Length","") or ""
+            if str(raw_len).isdigit(): expected=int(raw_len)
+            chunks=[]; total=0
+            try:
+                while True:
+                    part=r.read(262144)
+                    if not part: break
+                    chunks.append(part); total+=len(part)
+                    if total>MAX_BYTES:
+                        return False,"PAYLOAD_TOO_LARGE",0,""
+            except http.client.IncompleteRead as e:
+                if e.partial: total+=len(e.partial)
+                return False,f"INCOMPLETE_READ:{total}/{expected}",total,""
+            if expected is not None and total!=expected:
+                return False,f"INCOMPLETE_READ:{total}/{expected}",total,""
+            raw=b"".join(chunks)
             return True,int(getattr(r,"status",200)),len(raw),raw.decode("utf-8","replace")
+    except (urllib.error.URLError, TimeoutError, OSError, http.client.IncompleteRead, ConnectionError) as e:
+        return False,f"NETWORK_ERROR:{type(e).__name__}:{e}",0,""
     except Exception as e:
         return False,f"{type(e).__name__}:{e}",0,""
+
+def fetch(ds,url):
+    if ds!="TPEX_DAILY_K":
+        ok,status,n,text=fetch_once(url,35)
+        return ok,status,n,text,1
+    backoff=(2,8,20,45)
+    last=(False,"UNKNOWN",0,"",0)
+    for attempt in range(1,6):
+        ok,status,n,text=fetch_once(url,45 if attempt>=4 else 35)
+        last=(ok,status,n,text,attempt)
+        if ok: return last
+        recoverable=str(status).startswith("INCOMPLETE_READ") or str(status).startswith("NETWORK_ERROR")
+        if not recoverable or attempt>=5: return last
+        time.sleep(backoff[attempt-1])
+    return last
 
 def date_ok(text):
     marks=(D.strftime("%Y-%m-%d"),D.strftime("%Y/%m/%d"),D.strftime("%Y%m%d"),D.strftime("%m/%d/%Y"),"1150916","115/09/16","115年09月16日")
@@ -63,7 +94,7 @@ def validate(kind,text,markers):
         try:
             obj=json.loads(text)
             if not isinstance(obj,(list,dict)) or not obj: return False,"EMPTY_JSON"
-        except Exception as e: return False,"JSON_PARSE"
+        except Exception: return False,"JSON_PARSE"
     elif kind=="json_or_csv":
         try:
             obj=json.loads(text)
@@ -85,12 +116,11 @@ def main():
     rows=[]; failures=[]
     for ds,comps in TARGETS.items():
         for name,url,kind,markers,needs_date in comps:
-            ok,status,n,text=fetch(url)
-            if ok:
-                ok,status=validate(kind,text,markers)
+            ok,status,n,text,attempts=fetch(ds,url)
+            if ok: ok,status=validate(kind,text,markers)
             if ok and needs_date and not date_ok(text):
                 ok=False; status="DATE_EVIDENCE_MISSING"
-            row={"dataset":ds,"component":name,"ok":ok,"status":status,"bytes":n,"url":url}
+            row={"dataset":ds,"component":name,"ok":ok,"status":status,"bytes":n,"attempts":attempts,"url":url}
             rows.append(row); print(json.dumps(row,ensure_ascii=False),flush=True)
             if not ok: failures.append(f"{ds}/{name}:{status}")
             time.sleep(1)
