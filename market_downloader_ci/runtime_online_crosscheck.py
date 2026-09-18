@@ -17,7 +17,7 @@ SOURCES={
 }
 EXP={
 "TWSE_DAILY_K":{"sha":"b41fcec43166ee6702d7130237ba11c75347bd75fc922986115f16c004550ae5","row":["2330","台積電","20,919,285","142,588","49,812,874,845","2,375.00","2,395.00","2,375.00","2,380.00"]},
-"TWSE_INSTITUTIONAL":{"sha":"6c1fe3837a9a95da250af902561f52a966f92fe1b3fa687dd85334d8dbb868e9","row":["2330","台積電","8,374,396","17,118,776","-8,744,380"]},
+"TWSE_INSTITUTIONAL":{"sha":"6c1fe3837a9a95da250af902561f52a966f92fe1b3fa687dd85334d8dbb868e9","canonical":"26ffeacd8c7e0d2c0537513e433209e631e13d3d836b50c659b0d3b96897385c","row":["2330","台積電","8,374,396","17,118,776","-8,744,380"]},
 "TWSE_MARGIN":{"sha":"d69c2279a9d59005c6739eeb2e667d846fbf42dde1ed4bc7bf90bd6de3d0b7a7","row":["2330","台積電","733","190","59","29,282","29,766"]},
 "TWSE_FOREIGN_HOLD":{"sha":"7b07676b1ef8640e513615ab6ef64aad3b9681c9f52e861418eacadbf3b65a37","data_count":0,"total":0},
 "TWSE_LENDING":{"sha":"3ea708f8721fd28bfd5cc61e8254a1b5e0ffbbddc61be683a155343e7a51bcd9","row":["2330","台積電","122,610,000","8,787,000","71,704,000","59,693,000","2,380.00","142,069,340,000","集中市場"]},
@@ -57,7 +57,15 @@ def main():
         if name in ("TWSE_DAILY_K","TWSE_INSTITUTIONAL","TWSE_MARGIN"):
             row=csv_row_2330(text); r["row2330"]=row[:10] if row else None
             exp=EXP[name]; r["exact_sha_match"]=sha==exp["sha"]; r["row_match"]=bool(row and row[:len(exp["row"])]==exp["row"])
-            r["ok"]=r["exact_sha_match"] or r["row_match"]
+            if name=="TWSE_INSTITUTIONAL":
+                rows=list(csv.reader(io.StringIO(text)))
+                norm=[[x.strip() for x in rr] for rr in rows]
+                r["canonical_sha256"]=hashlib.sha256(json.dumps(norm,ensure_ascii=False,separators=(",",":")).encode()).hexdigest()
+                r["canonical_match"]=r["canonical_sha256"]==exp["canonical"]
+                r["row_count"]=len(rows)
+                r["ok"]=r["canonical_match"]
+            else:
+                r["ok"]=r["exact_sha_match"] or r["row_match"]
         elif name=="TWSE_FOREIGN_HOLD":
             obj=json.loads(text); r["date"]=obj.get("date"); r["stat"]=obj.get("stat"); r["data_count"]=len(obj.get("data") or []); r["total"]=obj.get("total")
             r["exact_sha_match"]=sha==EXP[name]["sha"]
