@@ -71,6 +71,9 @@ def main():
             time.sleep(1)
         report['results'][ds]=per
     report['historical_supported']={ds:any(x.get('target_present') for x in rows[1:]) for ds,rows in report['results'].items()}
+    report['gate']='PASS_CURRENT_ONLY' if not any(report['historical_supported'].values()) else 'FAIL_UNEXPECTED_HISTORY_CAPABILITY'
     print(json.dumps(report,ensure_ascii=False,indent=2),flush=True)
+    if any(report['historical_supported'].values()):
+        sys.exit(2)
 
 if __name__=='__main__': main()
