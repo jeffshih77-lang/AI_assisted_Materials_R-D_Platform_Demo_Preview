@@ -1,0 +1,19 @@
+name: T15 Targeted Runtime Verify
+on:
+  push:
+    branches: [market-downloader-ci-v015]
+    paths:
+      - 'market_downloader_ci/targeted_runtime_verify.py'
+      - '.github/workflows/t15-targeted-runtime-verify.yml'
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python market_downloader_ci/targeted_runtime_verify.py
