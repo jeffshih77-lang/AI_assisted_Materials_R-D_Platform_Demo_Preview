@@ -19,7 +19,11 @@ jobs:
         env:
           PYTHONUTF8: '1'
         run: python market_downloader_ci/contract_probe.py
-      - name: Full 18-line official open-data live gate
+      - name: Full official open-data live gate
         env:
           PYTHONUTF8: '1'
         run: python market_downloader_ci/full_line_open_data_probe.py
+      - name: Official OpenAPI selected-date capability gate
+        env:
+          PYTHONUTF8: '1'
+        run: python market_downloader_ci/openapi_date_param_probe.py
