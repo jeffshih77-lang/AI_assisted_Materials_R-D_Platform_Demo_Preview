@@ -1,7 +1,7 @@
-name: RAW W01 TWSE incremental 20260907-20260917
+name: RAW W01 TWSE single 20260918
 on:
   push:
-    branches: [raw-w01-incremental-20260918]
+    branches: [raw-w01-20260918-single-20260920]
     paths:
       - 'raw_w01_incremental/**'
       - '.github/workflows/raw-w01-incremental-20260918.yml'
@@ -9,7 +9,7 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: raw-w01-incremental-20260918
+  group: raw-w01-20260918-single-20260920
   cancel-in-progress: false
 jobs:
   collect:
@@ -43,7 +43,7 @@ jobs:
       - name: Upload immutable RAW correction artifact
         uses: actions/upload-artifact@v4
         with:
-          name: RAW-W01_TWSE_DAILY_K_INCREMENTAL_20260907_20260917
+          name: RAW-W01_TWSE_DAILY_K_20260918
           path: |
             raw_w01_incremental/out/packages/*.zip
             raw_w01_incremental/out/manifest/*.json
