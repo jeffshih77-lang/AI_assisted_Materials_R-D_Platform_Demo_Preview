@@ -40,7 +40,7 @@ control={
   "package_id":package_id,"dataset_id":"TWSE_DAILY_K","source_id":"TWSE",
   "source_family":"TWSE_MI_INDEX","schema_family":"TWSE_MI_INDEX_ALLBUT0999",
   "schema_version":"TWSE_MI_INDEX_JSON_RAW_V2","market":"TWSE",
-  "coverage_start":member_dates[0],"coverage_end":member_dates[-1],"historical_cutoff":"2026-09-04",
+  "coverage_start":member_dates[0],"coverage_end":member_dates[-1],"historical_cutoff":"2026-09-17",
   "work_units_total":len(member_dates),"work_units_completed":len(member_dates),"work_units_failed":0,
   "raw_member_count":len(meta["members"]),"row_count":rows,
   "package_name":pkg.name,"package_bytes":len(package_bytes),"package_sha256":package_sha,
@@ -59,19 +59,19 @@ receipt={
   "pit_lineage":{"source_trade_date_field":"TWSE payload date","market_timezone":"Asia/Taipei","retrieved_at_preserved":True,
                  "available_at":None,"available_at_status":"UNKNOWN_RAW_LAYER__DO_NOT_GUESS__DERIVE_CONSERVATIVELY_DOWNSTREAM",
                  "identity_mapping_status":"NOT_APPLIED_RAW_LAYER"},
-  "previous_coverage_boundary":"2026-09-04","new_coverage_start":member_dates[0],"new_coverage_end":member_dates[-1],
+  "previous_coverage_boundary":"2026-09-17","new_coverage_start":member_dates[0],"new_coverage_end":member_dates[-1],
   "non_overlap_incremental":True,"package_name":pkg.name,"package_bytes":len(package_bytes),"package_sha256":package_sha,
   "members":per_member,"created_at":created
 }
 coverage={
   "coverage_schema_version":"raw_coverage_delta_v1","package_id":package_id,"dataset_id":"TWSE_DAILY_K","market":"TWSE",
-  "previous_authorized_recent_end":"2026-09-04","candidate_extension_start":member_dates[0],"candidate_extension_end":member_dates[-1],
+  "previous_authorized_recent_end":"2026-09-17","candidate_extension_start":member_dates[0],"candidate_extension_end":member_dates[-1],
   "candidate_trade_dates":member_dates,"completed_units":len(member_dates),"failed_units":0,
   "status":"GITHUB_LOCAL_VERIFIED_PENDING_DRIVE_CLOUD_VERIFIED","cloud_authority":False,
   "rule":"Do not merge into central authority until package + sidecars are uploaded and Drive readback verifies bytes/SHA."
 }
-for name,obj in [("RAW-W01_TWSE_DAILY_K_INCREMENTAL_MANIFEST_20260907_20260917.json",control),
-                 ("RAW-W01_TWSE_DAILY_K_INCREMENTAL_RECEIPT_20260907_20260917.json",receipt),
-                 ("RAW-W01_TWSE_DAILY_K_COVERAGE_DELTA_20260907_20260917.json",coverage)]:
+for name,obj in [("RAW-W01_TWSE_DAILY_K_INCREMENTAL_MANIFEST_20260918_20260918.json",control),
+                 ("RAW-W01_TWSE_DAILY_K_INCREMENTAL_RECEIPT_20260918_20260918.json",receipt),
+                 ("RAW-W01_TWSE_DAILY_K_COVERAGE_DELTA_20260918_20260918.json",coverage)]:
     (manifest_dir/name).write_text(json.dumps(obj,ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
 print(json.dumps({"package":str(pkg),"sha256":package_sha,"bytes":len(package_bytes),"package_id":package_id,"rows":rows,"dates":member_dates},ensure_ascii=False))
