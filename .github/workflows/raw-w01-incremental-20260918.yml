@@ -7,9 +7,9 @@ on:
       - '.github/workflows/raw-w01-incremental-20260918.yml'
   workflow_dispatch:
 permissions:
-  contents: read
+  contents: write
 concurrency:
-  group: raw-w01-20260918-single-20260920
+  group: raw-w01-20260918-single-persist-20260920
   cancel-in-progress: false
 jobs:
   collect:
@@ -51,3 +51,19 @@ jobs:
             raw_w01_incremental/out/manifest/*.csv
           if-no-files-found: error
           retention-days: 7
+
+      - name: Persist verified 2026-09-18 result for controller readback
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf raw_w01_20260918_result
+          mkdir -p raw_w01_20260918_result/packages raw_w01_20260918_result/manifest
+          cp raw_w01_incremental/out/packages/*.zip raw_w01_20260918_result/packages/
+          cp raw_w01_incremental/out/manifest/*.json raw_w01_20260918_result/manifest/
+          cp raw_w01_incremental/out/manifest/*.jsonl raw_w01_20260918_result/manifest/ || true
+          cp raw_w01_incremental/out/manifest/*.csv raw_w01_20260918_result/manifest/ || true
+          git config user.name "raw-w01-bot"
+          git config user.email "raw-w01-bot@users.noreply.github.com"
+          git add raw_w01_20260918_result
+          git commit -m "RAW-W01: persist verified 2026-09-18 package" || exit 0
+          git push origin "HEAD:${GITHUB_REF_NAME}"
