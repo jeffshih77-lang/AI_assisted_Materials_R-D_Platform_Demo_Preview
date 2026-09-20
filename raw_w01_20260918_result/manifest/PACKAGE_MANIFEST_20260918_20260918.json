@@ -1,0 +1,21 @@
+{
+  "schema": "raw_w01_twse_daily_k_package_v2",
+  "created_at": "2026-09-20T13:07:11+00:00",
+  "dataset_id": "TWSE_DAILY_K",
+  "source_family": "TWSE_MI_INDEX_ALLBUT0999",
+  "schema_family": "TWSE_MI_INDEX_JSON_RAW_V2",
+  "coverage_start": "2026-09-18",
+  "coverage_end": "2026-09-18",
+  "work_units": 1,
+  "raw_member_format": "gzip(exact TWSE HTTP JSON response bytes)",
+  "sha256_scope": "uncompressed exact HTTP response bytes",
+  "members": [
+    {
+      "trade_date": "2026-09-18",
+      "path": "raw/twse/daily_all/2026/09/20260918.json.gz",
+      "rows": 1377,
+      "sha256": "cc864ed2fa843a65a649f0884c632e6af7e5e8c77836d91cd36e0044a9734731",
+      "bytes": 247659
+    }
+  ]
+}

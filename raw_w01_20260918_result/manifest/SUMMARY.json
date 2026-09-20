@@ -1,0 +1,13 @@
+{
+  "schema": "raw_w01_twse_daily_k_summary_v2",
+  "generated_at": "2026-09-20T13:07:11+00:00",
+  "selected_year": null,
+  "selected_phase": "HISTORICAL",
+  "scope_units": 1,
+  "done_this_run": 1,
+  "skipped_valid": 0,
+  "failed": 0,
+  "valid_units_total": 1,
+  "complete": true,
+  "failures": []
+}

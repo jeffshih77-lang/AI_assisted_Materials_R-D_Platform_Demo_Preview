@@ -1,0 +1,17 @@
+{
+  "coverage_schema_version": "raw_coverage_delta_v1",
+  "package_id": "RAW-W01-TWSE-DK-INC-20260918-20260918-4c1e3b1e5e6f",
+  "dataset_id": "TWSE_DAILY_K",
+  "market": "TWSE",
+  "previous_authorized_recent_end": "2026-09-17",
+  "candidate_extension_start": "2026-09-18",
+  "candidate_extension_end": "2026-09-18",
+  "candidate_trade_dates": [
+    "2026-09-18"
+  ],
+  "completed_units": 1,
+  "failed_units": 0,
+  "status": "GITHUB_LOCAL_VERIFIED_PENDING_DRIVE_CLOUD_VERIFIED",
+  "cloud_authority": false,
+  "rule": "Do not merge into central authority until package + sidecars are uploaded and Drive readback verifies bytes/SHA."
+}

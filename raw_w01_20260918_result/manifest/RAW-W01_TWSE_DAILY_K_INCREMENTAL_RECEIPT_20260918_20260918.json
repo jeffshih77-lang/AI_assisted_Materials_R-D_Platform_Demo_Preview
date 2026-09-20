@@ -1,0 +1,50 @@
+{
+  "receipt_schema_version": "raw_receipt_v1",
+  "package_id": "RAW-W01-TWSE-DK-INC-20260918-20260918-4c1e3b1e5e6f",
+  "work_id": "RAW-W01",
+  "dataset_id": "TWSE_DAILY_K",
+  "acquisition_role": "FORMAL_RAW_INCREMENTAL_CANDIDATE",
+  "provider": "Taiwan Stock Exchange (TWSE)",
+  "endpoint_template": "https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX?date={YYYYMMDD}&type=ALLBUT0999&response=json",
+  "request_contract": {
+    "type": "ALLBUT0999",
+    "response": "json",
+    "requested_date_must_equal_payload_date": true
+  },
+  "transport": {
+    "runner": "GitHub-hosted Ubuntu",
+    "collector": "RAW-W01_TWSE_DAILY_K_GITHUB_COLLECTOR_V2.py",
+    "byte_preserving": true,
+    "storage_compression": "gzip only"
+  },
+  "pit_lineage": {
+    "source_trade_date_field": "TWSE payload date",
+    "market_timezone": "Asia/Taipei",
+    "retrieved_at_preserved": true,
+    "available_at": null,
+    "available_at_status": "UNKNOWN_RAW_LAYER__DO_NOT_GUESS__DERIVE_CONSERVATIVELY_DOWNSTREAM",
+    "identity_mapping_status": "NOT_APPLIED_RAW_LAYER"
+  },
+  "previous_coverage_boundary": "2026-09-17",
+  "new_coverage_start": "2026-09-18",
+  "new_coverage_end": "2026-09-18",
+  "non_overlap_incremental": true,
+  "package_name": "TWSE_DAILY_K_20260918_20260918_OFFICIAL_RAW_V2.zip",
+  "package_bytes": 74575,
+  "package_sha256": "4c1e3b1e5e6f8aae0f7f49a4c7abf53912758cf8810afde2d17ee58ddeec71ee",
+  "members": [
+    {
+      "trade_date": "2026-09-18",
+      "path": "raw/twse/daily_all/2026/09/20260918.json.gz",
+      "rows": 1377,
+      "raw_bytes_uncompressed": 247659,
+      "sha256_uncompressed": "cc864ed2fa843a65a649f0884c632e6af7e5e8c77836d91cd36e0044a9734731",
+      "source_url": "https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX?date=20260918&type=ALLBUT0999&response=json",
+      "final_url": "https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX?date=20260918&type=ALLBUT0999&response=json",
+      "retrieved_at": "2026-09-20T13:07:10+00:00",
+      "http_source_status": "HTTP_200_AND_PAYLOAD_VALIDATED",
+      "payload_date_validation": "EXACT_MATCH"
+    }
+  ],
+  "created_at": "2026-09-20T13:07:11+00:00"
+}
